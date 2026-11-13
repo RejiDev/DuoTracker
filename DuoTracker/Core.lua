@@ -310,6 +310,18 @@ local function Needs(need, have)
     return list, hidden
 end
 
+-- Which side of the pair list belongs to this account: 1 or 2. Each known
+-- character votes, so pairs with no data yet still show the right way round.
+local function MySide()
+    local votes = 0
+    for _, p in ipairs(db.pairs) do
+        local a, b = db.chars[norm(p[1])], db.chars[norm(p[2])]
+        if p[1] ~= "" and a then votes = votes + (a.mine and 1 or -1) end
+        if p[2] ~= "" and b then votes = votes + (b.mine and -1 or 1) end
+    end
+    return votes < 0 and 2 or 1
+end
+
 function ns.Compare(index)
     local p = db.pairs[index]
     if not p then return nil end
@@ -317,7 +329,15 @@ function ns.Compare(index)
     local a, b = db.chars[norm(nameA)], db.chars[norm(nameB)]
     if nameA == "" then a = nil end
     if nameB == "" then b = nil end
-    if b and b.mine and not (a and a.mine) then
+    local swap
+    if (a and a.mine) or (b and not b.mine) then
+        swap = false
+    elseif (b and b.mine) or (a and not a.mine) then
+        swap = true
+    else
+        swap = MySide() == 2
+    end
+    if swap then
         a, b = b, a
         nameA, nameB = nameB, nameA
     end
