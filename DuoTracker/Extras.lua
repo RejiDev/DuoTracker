@@ -128,7 +128,10 @@ local function Collect()
             local index = list[i]
             if index then
                 local name, _, rank, maxRank = GetProfessionInfo(index)
-                if name then x.profs[#x.profs + 1] = { name, rank or 0, maxRank or 0 } end
+                if name then
+                    x.profs[#x.profs + 1] = { name, rank or 0, maxRank or 0 }
+                    if i <= 2 then x.np = (x.np or 0) + 1 end -- the first two are the main professions
+                end
             end
         end
     end
@@ -191,7 +194,7 @@ function ns.BuildExtras(key, x, rev)
     end
     for i, p in ipairs(x.profs) do profs[i] = ns.esc(p[1]) .. ":" .. p[2] .. ":" .. p[3] end
     return table.concat({ "X", ns.esc(key), rev, x.gold or 0, table.concat(eq, ","),
-        ns.EncodeIds(keys(x.bag)), table.concat(profs, ","), ns.EncodeIds(keys(x.craft)) }, "~")
+        ns.EncodeIds(keys(x.bag)), table.concat(profs, ","), ns.EncodeIds(keys(x.craft)), x.np or 0 }, "~")
 end
 
 ns.handlers.X = function(f)
@@ -211,6 +214,7 @@ ns.handlers.X = function(f)
         if name then x.profs[#x.profs + 1] = { ns.unesc(name), tonumber(rank), tonumber(max) } end
     end
     ns.DecodeIds(f[8], x.craft, {})
+    x.np = tonumber(f[9]) or math.min(2, #x.profs)
     c.x, c.xrev = x, tonumber(f[3])
     c.synced = time()
 end
@@ -302,6 +306,19 @@ end)
 ------------------------------------------------------------------------
 -- What the window shows
 ------------------------------------------------------------------------
+
+ns.SLOTS, ns.SLOT_NAMES = SLOTS, SLOT_NAMES
+
+-- "ok", "low" (well below the character's level), "empty" (should be filled by now) or "none".
+function ns.SlotState(c, slot)
+    local e = c.x.eq[slot]
+    local level = c.level or 1
+    if e then
+        return (e[2] > 0 and e[2] <= level - 8) and "low" or "ok", e[1], e[2]
+    end
+    if EXPECTED[slot] and level >= EXPECTED[slot] then return "empty" end
+    return "none"
+end
 
 function ns.GearSummary(c)
     if not (c and c.x) then return nil end
