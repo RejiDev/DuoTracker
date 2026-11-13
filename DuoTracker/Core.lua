@@ -660,9 +660,17 @@ local function Handle(text, from)
             ns.updateAvailable = theirs
             if not versionWarned then
                 versionWarned = true
-                Print("|cfff2a154Update available:|r " .. ns.PartnerLabel() .. " has version " .. theirs ..
-                    " and you have " .. MyVersion() .. ". Double-click \"Update Duo Tracker\", then type /reload.")
+                if db.reloadedFor == theirs then
+                    -- Already reloaded for this version and it still isn't here.
+                    Print("|cfff2a154Update " .. theirs .. " hasn't been downloaded yet.|r The background check runs every 30 minutes; " ..
+                        "to get it now, double-click \"Update Duo Tracker\" and then type /reload.")
+                else
+                    Print("|cfff2a154Update available:|r " .. ns.PartnerLabel() .. " has version " .. theirs ..
+                        " and you have " .. MyVersion() .. ". Open /duo and click the orange button to load it.")
+                end
             end
+        else
+            db.reloadedFor = nil
         end
         if f[3] == "1" then Send(partner, BuildHello(false)) end
         SendChanges(known)

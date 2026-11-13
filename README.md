@@ -8,7 +8,9 @@ A World of Warcraft: Forever addon for two people levelling characters in pairs.
 2. Double-click it. Windows may show "Windows protected your PC" the first time: click **More info**, then **Run anyway**.
 3. Restart the game after the first install. After an update, type `/reload` in chat.
 
-Keep the file on your desktop. Double-click it again whenever the addon says an update is available.
+Running it once also switches on automatic updates: your PC then checks for a new version every 30 minutes in the background. When the addon says an update is available, open `/duo` and click the orange button to reload.
+
+To switch automatic updates off, download and run **Remove Duo Tracker auto-update.bat**.
 
 ## In game
 

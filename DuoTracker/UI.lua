@@ -925,14 +925,19 @@ local function Build()
     close:SetPoint("TOPRIGHT", 0, 0)
 
     updateButton = CreateFrame("Button", nil, frame, TEMPLATE)
-    updateButton:SetSize(150, 22)
+    updateButton:SetSize(210, 22)
     updateButton:SetPoint("TOPLEFT", 10, -10)
     Backdrop(updateButton, 0.95, 0.63, 0.33, 1)
     updateButton.text = FS(updateButton, "GameFontHighlightSmall", "CENTER", { 0.12, 0.10, 0.07 })
     updateButton.text:SetPoint("CENTER")
     updateButton:SetScript("OnClick", function()
-        ns.Print("Version " .. tostring(ns.updateAvailable) .. " is available and you have " .. ns.MyVersion() .. ".")
-        ns.Print("Double-click \"Update Duo Tracker\" on your desktop, then type /reload here.")
+        -- The background updater downloads new versions; a reload makes the game load them.
+        ns.db.reloadedFor = ns.updateAvailable
+        if ReloadUI then
+            ReloadUI()
+        else
+            ns.Print("Type /reload to load version " .. tostring(ns.updateAvailable) .. ".")
+        end
     end)
     updateButton:Hide()
 
@@ -971,7 +976,7 @@ function ns.RefreshUI()
     info:SetText((ns.PartnerOnline() and (partner .. " is online. ") or (partner .. " is offline. ")) ..
         "Last sync: " .. ns.Ago(ns.db.lastSync):lower() .. ".")
     if ns.updateAvailable then
-        updateButton.text:SetText("Update available: " .. ns.updateAvailable)
+        updateButton.text:SetText("Update " .. ns.updateAvailable .. ": click to reload")
         updateButton:Show()
     else
         updateButton:Hide()
