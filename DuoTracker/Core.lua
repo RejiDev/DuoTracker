@@ -379,6 +379,9 @@ function ns.Compare(index)
     return r
 end
 
+ns.esc, ns.unesc, ns.split, ns.plain, ns.Changed = esc, unesc, split, plain, Changed
+function ns.Me() return me end
+
 function ns.PartnerLabel()
     return db.partnerName or "Partner"
 end
@@ -487,6 +490,8 @@ end
 -- Messages
 ------------------------------------------------------------------------
 
+ns.handlers = {} -- extra message kinds, added by Extras.lua
+
 local function Send(target, text)
     if not target then return end
     msgSeq = msgSeq + 1
@@ -495,6 +500,10 @@ local function Send(target, text)
         queue[#queue + 1] = { target, "M#" .. msgSeq .. "#" .. i .. "#" .. n .. "#" ..
             text:sub((i - 1) * CHUNK + 1, i * CHUNK) }
     end
+end
+
+function ns.SendToPartner(text)
+    if partner then Send(partner, text) end
 end
 
 local function Pump()
@@ -515,7 +524,8 @@ local function BuildHello(wantReply)
     for key, c in pairs(db.chars) do
         parts[#parts + 1] = esc(key) .. ":" .. (c.rev or 0) .. ":" .. (c.qrev or 0)
     end
-    return "H~" .. PROTO .. "~" .. (wantReply and 1 or 0) .. "~" .. table.concat(parts, ",") .. "~" .. esc(MyVersion())
+    return "H~" .. PROTO .. "~" .. (wantReply and 1 or 0) .. "~" .. table.concat(parts, ",") .. "~" .. esc(MyVersion()) ..
+        "~" .. (ns.HelloExtra and ns.HelloExtra() or "")
 end
 
 local function BuildStatus(key, c)
@@ -546,6 +556,8 @@ local function BuildQuests(key, c)
         EncodeIds(done, c.gq), EncodeIds(pending, c.gq) }, "~")
 end
 
+ns.EncodeIds = EncodeIds
+
 local function DecodeIds(data, into, gq)
     local prev = 0
     for tok in data:gmatch("[^,]+") do
@@ -557,6 +569,8 @@ local function DecodeIds(data, into, gq)
         if g ~= "" then gq[prev] = tonumber(g) end
     end
 end
+
+ns.DecodeIds = DecodeIds
 
 local function SendChanges(known)
     -- Sends each of this account's characters the partner doesn't have the latest of.
@@ -604,6 +618,7 @@ local function Handle(text, from)
         end
         if f[3] == "1" then Send(partner, BuildHello(false)) end
         SendChanges(known)
+        if ns.OnHello then ns.OnHello(f[6] or "") end
         AfterSync()
     elseif kind == "S" and #f >= 13 then
         local key = unesc(f[2])
@@ -636,6 +651,9 @@ local function Handle(text, from)
         c.guides, c.done, c.gq = guides, done, gq
         c.qrev = tonumber(f[3])
         c.synced = time()
+        AfterSync()
+    elseif ns.handlers[kind] then
+        ns.handlers[kind](f)
         AfterSync()
     end
 end
@@ -771,6 +789,7 @@ local function Flush()
     if dirty then Send(partner, BuildStatus(key, me)) end
     if questDirty and me.done then Send(partner, BuildQuests(key, me)) end
     dirty, questDirty = false, false
+    if ns.OnFlush then ns.OnFlush() end
 end
 
 ------------------------------------------------------------------------
@@ -787,6 +806,7 @@ local function InitDB()
     db.chars = db.chars or {}
     db.ignored = db.ignored or {}
     db.minimap = db.minimap or {}
+    db.notes = db.notes or {}
     if not db.pairs then
         db.pairs = {}
         for i, p in ipairs(ns.DEFAULT_PAIRS) do db.pairs[i] = { p[1], p[2] } end
@@ -893,6 +913,7 @@ events:SetScript("OnEvent", function(_, event, ...)
         C_Timer.NewTicker(5, function()
             ticks = ticks + 1
             Snapshot(false)
+            if ns.OnTick then pcall(ns.OnTick) end
             if ticks % 4 == 0 then Flush() end
             if ticks % 12 == 0 then
                 TryHello(false)

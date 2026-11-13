@@ -6,7 +6,8 @@ local TOP = 82           -- space above the first pair row
 local ROW_H = 46
 local LINE_H = 16
 local VISIBLE = 9        -- detail lines shown at once
-local DETAIL_H = VISIBLE * LINE_H + 16
+local TAB_H = 26
+local DETAIL_H = TAB_H + VISIBLE * LINE_H + 16
 local BAR_W = 190
 -- x positions inside a row (the row is W - 16 wide)
 local LEFT_EDGE, MID, RIGHT_EDGE, QUEST_EDGE = 276, 365, 454, 850
@@ -16,6 +17,9 @@ local BODY = { 0.93, 0.89, 0.82 }
 local MUTED = { 0.71, 0.65, 0.55 }
 local WHITE = "Interface\\Buttons\\WHITE8X8"
 
+local TABS = { { "quests", "Quests" }, { "gear", "Gear" }, { "profs", "Professions" }, { "gold", "Gold" }, { "notes", "Notes" } }
+local tab = "quests"
+local tabButtons, noteBox = {}, nil
 local frame, info, detail, more, updateButton
 local headers, rows, lines = {}, {}, {}
 local selected, offset = nil, 0   -- selected: nil = pick a default, false = collapsed
@@ -118,7 +122,7 @@ end
 local function MakeLine(i)
     local line = CreateFrame("Button", nil, detail)
     line:SetSize(W - 60, LINE_H)
-    line:SetPoint("TOPLEFT", 32, -(8 + (i - 1) * LINE_H))
+    line:SetPoint("TOPLEFT", 32, -(TAB_H + 8 + (i - 1) * LINE_H))
     line.text = FS(line, "GameFontHighlightSmall", "LEFT")
     line.text:SetPoint("LEFT")
     line.text:SetWidth(W - 60)
@@ -126,6 +130,16 @@ local function MakeLine(i)
     line:RegisterForClicks("RightButtonUp")
     line:SetScript("OnClick", function(self)
         if self.questId then ns.Ignore(self.questId) end
+    end)
+    line:SetScript("OnEnter", function(self)
+        if type(self.itemId) == "number" and GameTooltip then
+            GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+            GameTooltip:SetHyperlink("item:" .. self.itemId)
+            GameTooltip:Show()
+        end
+    end)
+    line:SetScript("OnLeave", function()
+        if GameTooltip then GameTooltip:Hide() end
     end)
     lines[i] = line
     return line
@@ -199,6 +213,34 @@ local function Build()
     more:SetPoint("BOTTOMRIGHT", -8, 6)
     more:SetText("Scroll for more")
     for i = 1, VISIBLE do MakeLine(i) end
+
+    for i, t in ipairs(TABS) do
+        local b = CreateFrame("Button", nil, detail)
+        b:SetSize(112, 20)
+        b:SetPoint("TOPLEFT", 8 + (i - 1) * 116, -4)
+        b.bg = b:CreateTexture(nil, "BACKGROUND")
+        b.bg:SetAllPoints()
+        b.text = FS(b, "GameFontHighlightSmall", "CENTER")
+        b.text:SetPoint("CENTER")
+        b.text:SetText(t[2])
+        b:SetScript("OnClick", function()
+            tab, offset = t[1], 0
+            ns.RefreshUI()
+        end)
+        tabButtons[i] = b
+    end
+
+    noteBox = CreateFrame("EditBox", nil, detail, "InputBoxTemplate")
+    noteBox:SetSize(W - 120, 20)
+    noteBox:SetPoint("BOTTOMLEFT", 40, 10)
+    noteBox:SetAutoFocus(false)
+    noteBox:SetMaxLetters(200)
+    noteBox:SetScript("OnEnterPressed", function(self)
+        if selected then ns.SetNote(selected, self:GetText()) end
+        self:ClearFocus()
+    end)
+    noteBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    noteBox:Hide()
     frame:Hide()
 end
 
@@ -207,19 +249,118 @@ local function GuideLabel(c)
     return (c.group and (c.group .. " / ") or "") .. c.guide
 end
 
-local function DetailEntries(r)
+local GOOD = { 0.50, 0.82, 0.76 }
+
+local function GearEntries(r, add)
+    for _, c in ipairs({ r.you, r.them }) do
+        local g = ns.GearSummary(c)
+        if not g then
+            add(c.name .. ": gear hasn't synced yet.", nil, MUTED)
+        else
+            add(c.name .. ": average item level " .. g.avg ..
+                (g.weakest and (". Weakest slot: " .. g.weakest .. " (item level " .. g.weakestLevel .. ").") or "."), nil, GOLD)
+            if #g.empty > 0 then add("   Empty: " .. table.concat(g.empty, ", "), nil, { 0.95, 0.63, 0.33 }) end
+            if #g.low > 0 then add("   Well below level " .. (c.level or "?") .. ": " .. table.concat(g.low, ", "), nil, { 0.95, 0.63, 0.33 }) end
+        end
+    end
+    local function bags(forChar, fromChar)
+        local list = ns.HandMeDowns(forChar, fromChar)
+        if not list then return end
+        if #list == 0 then
+            add("Nothing in " .. fromChar.name .. "'s bags for " .. forChar.name .. ".", nil, MUTED)
+            return
+        end
+        add("In " .. fromChar.name .. "'s bags for " .. forChar.name .. " (" .. #list .. "):", nil, GOLD)
+        for _, it in ipairs(list) do add("   " .. it.text, nil, BODY, it.id) end
+    end
+    bags(r.you, r.them)
+    bags(r.them, r.you)
+end
+
+local function ProfEntries(r, add)
+    for _, c in ipairs({ r.you, r.them }) do
+        if not c.x then
+            add(c.name .. ": professions haven't synced yet.", nil, MUTED)
+        elseif #c.x.profs == 0 then
+            add(c.name .. ": no professions.", nil, GOLD)
+        else
+            local cap = ns.SkillCap(c.level)
+            add(c.name .. " (level " .. (c.level or "?") .. ", can reach " .. cap .. "):", nil, GOLD)
+            for _, p in ipairs(c.x.profs) do
+                local text = "   " .. p[1] .. " " .. p[2] .. " / " .. p[3]
+                if p[2] >= cap and cap > 0 then
+                    add(text .. ". At the cap for this level.", nil, GOOD)
+                else
+                    add(text .. ". " .. (cap - p[2]) .. " behind." ..
+                        (p[3] < cap and " Needs the next rank from a trainer." or ""), nil, BODY)
+                end
+            end
+        end
+    end
+    local function craft(forChar, fromChar)
+        local list = ns.CanCraft(forChar, fromChar)
+        if not list or #list == 0 then return end
+        add(fromChar.name .. " can craft for " .. forChar.name .. " (" .. #list .. "):", nil, GOLD)
+        for _, it in ipairs(list) do add("   " .. it.text, nil, BODY, it.id) end
+    end
+    craft(r.you, r.them)
+    craft(r.them, r.you)
+    add("Recipes are read when a profession window is opened, so open each one once.", nil, MUTED)
+end
+
+local function GoldEntries(r, add)
+    local total, known = 0, true
+    for _, c in ipairs({ r.you, r.them }) do
+        local line = ns.MountLine(c)
+        if line then
+            add(c.name .. ": " .. line)
+            total = total + (c.x.gold or 0)
+        else
+            add(c.name .. ": gold hasn't synced yet.", nil, MUTED)
+            known = false
+        end
+    end
+    if known then add("Together: " .. ns.Money(total) .. ".", nil, GOLD) end
+end
+
+local function NoteEntries(index, add)
+    local note = ns.db.notes[ns.PairKey(index) or ""]
+    if note and note.text ~= "" then
+        add(note.text)
+        add("Written by " .. (note.by or "?") .. ", " .. ns.Ago(note.t):lower() .. ".", nil, MUTED)
+    else
+        add("No note for this pair yet.", nil, MUTED)
+    end
+    add("Type below and press Enter. Your partner sees it after the next sync.", nil, MUTED)
+end
+
+local function DetailEntries(r, index)
     local e = {}
-    local function add(text, questId, color)
+    local function add(text, questId, color, itemId)
         color = color or BODY
-        e[#e + 1] = { text = text, questId = questId, r = color[1], g = color[2], b = color[3] }
+        e[#e + 1] = { text = text, questId = questId, itemId = itemId, r = color[1], g = color[2], b = color[3] }
     end
     local partner = ns.PartnerLabel()
     if r.themName == "" then
         add("This pair has no second character yet. Type: /duo pair " .. r.youName .. " = Character Name", nil, GOLD)
         return e
     end
+    if tab == "notes" then
+        NoteEntries(index, add)
+        return e
+    end
     if r.status == "nodata" then
         add("Waiting for data. Each character shows up once it has logged in with this addon and you've both been online.", nil, MUTED)
+        return e
+    end
+    if tab == "gear" then
+        GearEntries(r, add)
+        return e
+    elseif tab == "profs" then
+        ProfEntries(r, add)
+        return e
+    elseif tab == "gold" then
+        GoldEntries(r, add)
         return e
     end
     if r.guideDiff then
@@ -241,7 +382,7 @@ local function DetailEntries(r)
     local function section(list, hidden, name)
         local note = hidden > 0 and ("  " .. hidden .. " class or race quests hidden.") or ""
         if #list == 0 then
-            add(name .. " needs no quests." .. note, nil, { 0.50, 0.82, 0.76 })
+            add(name .. " needs no quests." .. note, nil, GOOD)
             return
         end
         add(name .. " needs " .. #list .. (#list == 1 and " quest." or " quests.") ..
@@ -338,7 +479,27 @@ function ns.RefreshUI()
     end
     frame:SetHeight(y + 10)
 
-    local entries = chosen and DetailEntries(chosen) or {}
+    for i, t in ipairs(TABS) do
+        local b = tabButtons[i]
+        if t[1] == tab then
+            b.bg:SetColorTexture(0.54, 0.42, 0.18, 0.55)
+            b.text:SetTextColor(1, 0.93, 0.75)
+        else
+            b.bg:SetColorTexture(1, 1, 1, 0.05)
+            b.text:SetTextColor(MUTED[1], MUTED[2], MUTED[3])
+        end
+    end
+    if chosen and tab == "notes" and chosen.themName ~= "" then
+        if not noteBox:IsShown() then
+            local note = ns.db.notes[ns.PairKey(selected) or ""]
+            noteBox:SetText(note and note.text or "")
+            noteBox:Show()
+        end
+    else
+        noteBox:Hide()
+    end
+
+    local entries = chosen and DetailEntries(chosen, selected) or {}
     offset = math.max(0, math.min(offset, #entries - VISIBLE))
     for i = 1, VISIBLE do
         local line, entry = lines[i], entries[offset + i]
@@ -346,9 +507,10 @@ function ns.RefreshUI()
             line.text:SetText(entry.text)
             line.text:SetTextColor(entry.r, entry.g, entry.b)
             line.questId = entry.questId
+            line.itemId = entry.itemId
             line:Show()
         else
-            line.questId = nil
+            line.questId, line.itemId = nil, nil
             line:Hide()
         end
     end
