@@ -56,6 +56,63 @@ local function ItemInfo(id)
 end
 ns.ItemInfo = ItemInfo
 
+-- An item's stats as { strength, agility, stamina, intellect, spirit, weapon DPS x 10 }.
+local STAT_KEYS = { "ITEM_MOD_STRENGTH_SHORT", "ITEM_MOD_AGILITY_SHORT", "ITEM_MOD_STAMINA_SHORT",
+    "ITEM_MOD_INTELLECT_SHORT", "ITEM_MOD_SPIRIT_SHORT" }
+local STAT_NAMES = { "Str", "Agi", "Sta", "Int", "Spi" }
+
+local function ReadStats(link)
+    local get = (C_Item and C_Item.GetItemStats) or GetItemStats
+    if not (get and link) then return nil end
+    local ok, t = pcall(get, link)
+    if not ok or type(t) ~= "table" then return nil end
+    local out = {}
+    for i, key in ipairs(STAT_KEYS) do out[i] = math.floor((tonumber(t[key]) or 0) + 0.5) end
+    out[6] = math.floor((tonumber(t.ITEM_MOD_DAMAGE_PER_SECOND_SHORT) or 0) * 10 + 0.5)
+    return out
+end
+
+-- What each class wants from gear, as weights for the five stats above.
+local MELEE = { WARRIOR = { 1, 0.5, 0.7, 0, 0 }, PALADIN = { 1, 0.3, 0.7, 0.3, 0 }, HUNTER = { 0.2, 1, 0.6, 0.3, 0.1 },
+    ROGUE = { 0.5, 1, 0.6, 0, 0 }, DRUID = { 0.8, 0.8, 0.7, 0.1, 0.1 }, SHAMAN = { 0.8, 0.6, 0.6, 0.4, 0.1 } }
+local CASTER = { PRIEST = { 0, 0, 0.5, 1, 1 }, MAGE = { 0, 0, 0.5, 1, 0.6 }, WARLOCK = { 0, 0, 1, 0.8, 0.5 },
+    DRUID = { 0, 0, 0.5, 1, 0.9 }, SHAMAN = { 0, 0, 0.5, 1, 0.6 }, PALADIN = { 0, 0, 0.6, 1, 0.6 } }
+
+-- Pure casters and pure fighters are fixed. Druids, Shamans and Paladins are
+-- read from the gear they wear: more intellect and spirit than strength and agility means caster.
+local function IsCaster(c)
+    local class = c.class
+    if not MELEE[class] then return true end
+    if not CASTER[class] then return false end
+    local fight, cast = 0, 0
+    for _, e in pairs(c.x.eq) do
+        local st = e[3]
+        if st then
+            fight = fight + st[1] + st[2]
+            cast = cast + st[4] + st[5]
+        end
+    end
+    return cast > fight
+end
+
+local function Score(weights, stats)
+    local total = 0
+    for i = 1, 5 do total = total + weights[i] * stats[i] end
+    return total
+end
+
+local function Describe(stats, ilvl, showDps)
+    if stats then
+        local parts = {}
+        if showDps and stats[6] > 0 then parts[#parts + 1] = string.format("%.1f DPS", stats[6] / 10) end
+        for i = 1, 5 do
+            if stats[i] > 0 then parts[#parts + 1] = stats[i] .. " " .. STAT_NAMES[i] end
+        end
+        if #parts > 0 then return table.concat(parts, ", ") end
+    end
+    return "item level " .. (ilvl or 0)
+end
+
 local function BestArmor(class, level)
     local a = ARMOR[class]
     if not a then return 1 end
@@ -80,15 +137,87 @@ local function CanUse(class, level, item, strict)
     return false
 end
 
-local function CurrentLevel(c, item)
-    -- Lowest item level the character has in the slot(s) this item goes in; 0 if empty.
-    local low
-    for _, slot in ipairs(EQUIP_SLOTS[item.equipLoc]) do
+-- Would `item` be an upgrade for the character? Returns nil when it isn't the
+-- kind of thing they'd use, else: isUpgrade, what it offers, what they wear now (nil if the slot is empty).
+local function Judge(c, item, stats)
+    local class = c.class
+    local caster = IsCaster(c)
+    local weights = (caster and CASTER or MELEE)[class]
+    local loc = item.equipLoc
+    local slots = EQUIP_SLOTS[loc]
+    local weapon = item.classID == 2
+
+    local function worn(slot)
         local e = c.x.eq[slot]
-        local v = e and e[2] or 0
-        if not low or v < low then low = v end
+        if not e then return nil end
+        return ItemInfo(e[1]), e[3], e[2]
     end
-    return low or 0
+    local mainInfo = worn(16)
+    local offInfo = worn(17)
+    if (weapon or slots[1] == 17) and ((c.x.eq[16] and not mainInfo) or (c.x.eq[17] and not offInfo)) then
+        return nil -- the game hasn't loaded what they're holding yet
+    end
+    local mainLoc, offLoc = mainInfo and mainInfo.equipLoc, offInfo and offInfo.equipLoc
+
+    -- Only like for like: no one-handers for someone using a two-hander, and so on.
+    if loc == "INVTYPE_2HWEAPON" then
+        if mainLoc and mainLoc ~= "INVTYPE_2HWEAPON" then return nil end
+    elseif loc == "INVTYPE_WEAPON" or loc == "INVTYPE_WEAPONMAINHAND" then
+        if mainLoc == "INVTYPE_2HWEAPON" then return nil end
+    elseif loc == "INVTYPE_WEAPONOFFHAND" then
+        if not (offLoc == "INVTYPE_WEAPONOFFHAND" or offLoc == "INVTYPE_WEAPON") then return nil end
+    elseif loc == "INVTYPE_SHIELD" then
+        if mainLoc == "INVTYPE_2HWEAPON" or (offLoc and offLoc ~= "INVTYPE_SHIELD") then return nil end
+    elseif loc == "INVTYPE_HOLDABLE" then
+        if not caster or mainLoc == "INVTYPE_2HWEAPON" or (offLoc and offLoc ~= "INVTYPE_HOLDABLE") then return nil end
+    end
+
+    -- Weapons the character actually hits with are judged on damage. Everything
+    -- else, including a caster's staff or a fighter's bow, is judged on stats.
+    local ranged = slots[1] == 18
+    local byDps = weapon and ((class == "HUNTER" and ranged) or (not caster and class ~= "HUNTER" and not ranged) or
+        (caster and loc == "INVTYPE_RANGEDRIGHT"))
+    local function measure(st)
+        if not st then return nil end
+        if byDps then return st[6] end
+        return Score(weights, st)
+    end
+
+    local mine = measure(stats)
+    local lowest, lowestStats, lowestLevel, empty
+    for _, slot in ipairs(slots) do
+        local info, st, ilvl = worn(slot)
+        if not c.x.eq[slot] then
+            empty = true
+        else
+            local m = measure(st)
+            if lowest == nil or (m or -1) < (lowest or -1) then
+                lowest, lowestStats, lowestLevel = m or false, st, ilvl
+            end
+        end
+    end
+    local offer = Describe(stats, item.ilvl, byDps)
+    if empty then
+        -- A caster still shouldn't pick up a weapon with nothing on it for them.
+        if weapon and not byDps and mine == 0 then return nil end
+        return true, offer, nil
+    end
+    local now = Describe(lowestStats, lowestLevel, byDps)
+    local upgrade
+    if mine and lowest then
+        if mine == 0 and lowest == 0 then
+            upgrade = item.ilvl > (lowestLevel or 0)
+        else
+            upgrade = mine > lowest
+        end
+    elseif mine then
+        upgrade = mine > 0 and item.ilvl > (lowestLevel or 0)
+    elseif weapon and not byDps then
+        upgrade = false -- can't tell whether it has the right stats
+    else
+        upgrade = item.ilvl > (lowestLevel or 0)
+    end
+    return upgrade, offer, now
 end
 
 ------------------------------------------------------------------------
@@ -99,7 +228,7 @@ local function Collect()
     local me = ns.Me()
     if not me then return end
     pendingItems = false
-    local x = { gold = ns.plain(GetMoney and GetMoney()) or 0, eq = {}, bag = {}, profs = {},
+    local x = { gold = ns.plain(GetMoney and GetMoney()) or 0, eq = {}, bag = {}, bagStats = {}, profs = {},
         craft = (me.x and me.x.craft) or {} }
     for _, slot in ipairs(SLOTS) do
         local id = GetInventoryItemID and GetInventoryItemID("player", slot)
@@ -108,7 +237,7 @@ local function Collect()
             local link = GetInventoryItemLink and GetInventoryItemLink("player", slot)
             local detailed = (C_Item and C_Item.GetDetailedItemLevelInfo) or GetDetailedItemLevelInfo
             local ilvl = link and detailed and detailed(link) or (info and info.ilvl)
-            x.eq[slot] = { id, ns.plain(ilvl) or 0 }
+            x.eq[slot] = { id, ns.plain(ilvl) or 0, ReadStats(link) }
         end
     end
     if C_Container and C_Container.GetContainerNumSlots then
@@ -117,7 +246,10 @@ local function Collect()
                 local it = C_Container.GetContainerItemInfo(bag, slot)
                 if it and it.itemID and not it.isBound then
                     local info = ItemInfo(it.itemID)
-                    if info and EQUIP_SLOTS[info.equipLoc] and info.quality >= 1 then x.bag[it.itemID] = true end
+                    if info and EQUIP_SLOTS[info.equipLoc] and info.quality >= 1 then
+                        x.bag[it.itemID] = true
+                        x.bagStats[it.itemID] = ReadStats(it.hyperlink)
+                    end
                 end
             end
         end
@@ -193,8 +325,16 @@ function ns.BuildExtras(key, x, rev)
         if e then eq[#eq + 1] = slot .. "." .. e[1] .. "." .. e[2] end
     end
     for i, p in ipairs(x.profs) do profs[i] = ns.esc(p[1]) .. ":" .. p[2] .. ":" .. p[3] end
+    local eqStats, bagStats = {}, {}
+    for _, slot in ipairs(SLOTS) do
+        local e = x.eq[slot]
+        if e and e[3] then eqStats[#eqStats + 1] = slot .. ":" .. table.concat(e[3], ".") end
+    end
+    local bagIds = keys(x.bagStats or {})
+    table.sort(bagIds)
+    for _, id in ipairs(bagIds) do bagStats[#bagStats + 1] = id .. ":" .. table.concat(x.bagStats[id], ".") end
     return table.concat({ "X", ns.esc(key), rev, x.gold or 0, table.concat(eq, ","),
-        ns.EncodeIds(keys(x.bag)), table.concat(profs, ","), ns.EncodeIds(keys(x.craft)), x.np or 0 }, "~")
+        ns.EncodeIds(keys(x.bag)), table.concat(profs, ","), ns.EncodeIds(keys(x.craft)), x.np or 0, table.concat(eqStats, ","), table.concat(bagStats, ",") }, "~")
 end
 
 ns.handlers.X = function(f)
@@ -204,7 +344,7 @@ ns.handlers.X = function(f)
     if c and c.mine then return end
     c = c or {}
     ns.db.chars[key] = c
-    local x = { gold = tonumber(f[4]) or 0, eq = {}, bag = {}, profs = {}, craft = {} }
+    local x = { gold = tonumber(f[4]) or 0, eq = {}, bag = {}, bagStats = {}, profs = {}, craft = {} }
     for slot, id, ilvl in f[5]:gmatch("(%d+)%.(%d+)%.(%d+)") do
         x.eq[tonumber(slot)] = { tonumber(id), tonumber(ilvl) }
     end
@@ -215,6 +355,17 @@ ns.handlers.X = function(f)
     end
     ns.DecodeIds(f[8], x.craft, {})
     x.np = tonumber(f[9]) or math.min(2, #x.profs)
+    local function stats(text)
+        local out = {}
+        for n in text:gmatch("%d+") do out[#out + 1] = tonumber(n) end
+        return #out == 6 and out or nil
+    end
+    for slot, text in (f[10] or ""):gmatch("(%d+):([%d%.]+)") do
+        local e = x.eq[tonumber(slot)]
+        if e then e[3] = stats(text) end
+    end
+    x.bagStats = {}
+    for id, text in (f[11] or ""):gmatch("(%d+):([%d%.]+)") do x.bagStats[tonumber(id)] = stats(text) end
     c.x, c.xrev = x, tonumber(f[3])
     c.synced = time()
 end
@@ -339,44 +490,38 @@ function ns.GearSummary(c)
         weakestLevel = weakestLevel, empty = empty, low = low }
 end
 
-local function Wearables(forChar, fromChar, ids, onlyUpgrades)
+local function Wearables(forChar, fromChar, ids, knownStats)
     local list = {}
     if not (forChar and fromChar and forChar.x and fromChar.x and forChar.class) then return nil end
     for id in pairs(ids) do
         local item = ItemInfo(id)
         if item and CanUse(forChar.class, forChar.level, item) and item.minLevel <= (forChar.level or 1) + 2 then
-            local current = CurrentLevel(forChar, item)
-            local upgrade = item.ilvl > current
-            local cant = not onlyUpgrades and fromChar.class and not CanUse(fromChar.class, fromChar.level, item, true)
-            if upgrade or cant then
-                local text = (item.link or item.name) .. "  " .. SLOT_NAMES[EQUIP_SLOTS[item.equipLoc][1]] ..
-                    ", item level " .. item.ilvl
-                if upgrade then
-                    text = text .. (current > 0 and (" (wearing " .. current .. ")") or " (slot empty)")
-                else
-                    text = text .. " (not an upgrade)"
-                end
+            local stats = (knownStats and knownStats[id]) or ReadStats("item:" .. id)
+            local upgrade, offer, now = Judge(forChar, item, stats)
+            if upgrade then
+                local text = (item.link or item.name) .. "  " .. SLOT_NAMES[EQUIP_SLOTS[item.equipLoc][1]] .. ": " .. offer ..
+                    (now and (" (wearing " .. now .. ")") or " (slot empty)")
                 if item.minLevel > (forChar.level or 1) then text = text .. ", needs level " .. item.minLevel end
-                if cant then text = text .. ". " .. (fromChar.long or fromChar.name) .. " can't use it" end
-                list[#list + 1] = { id = id, text = text, gain = upgrade and (item.ilvl - current) or -1 }
+                if fromChar.class and not CanUse(fromChar.class, fromChar.level, item, true) then
+                    text = text .. ". " .. (fromChar.long or fromChar.name) .. " can't use it"
+                end
+                list[#list + 1] = { id = id, text = text }
             end
         end
     end
-    table.sort(list, function(a, b)
-        if a.gain ~= b.gain then return a.gain > b.gain end
-        return a.id < b.id
-    end)
+    table.sort(list, function(a, b) return a.id < b.id end)
     return list
 end
 
 -- Unbound items in fromChar's bags that forChar could use.
 function ns.HandMeDowns(forChar, fromChar)
-    return Wearables(forChar, fromChar, fromChar and fromChar.x and fromChar.x.bag or {}, false)
+    local x = fromChar and fromChar.x
+    return Wearables(forChar, fromChar, x and x.bag or {}, x and x.bagStats)
 end
 
 -- Things fromChar knows how to make that would be an upgrade for forChar.
 function ns.CanCraft(forChar, fromChar)
-    return Wearables(forChar, fromChar, fromChar and fromChar.x and fromChar.x.craft or {}, true)
+    return Wearables(forChar, fromChar, fromChar and fromChar.x and fromChar.x.craft or {}, nil)
 end
 
 function ns.SkillCap(level)
