@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: Duo Tracker
+## Notes: Shows which character in each levelling pair has fallen behind on level, RestedXP guide step and quests.
+## Version: 1.1.0
+## SavedVariables: DuoTrackerDB
+## OptionalDeps: RXPGuides
+
+Core.lua
+UI.lua
