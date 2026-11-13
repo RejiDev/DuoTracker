@@ -396,7 +396,7 @@ local function BuildQuests()
             else
                 add(Colored(c) .. "  |cfff2a154" .. #need .. " to catch up with " .. ns.Mid(other) .. "|r")
                 for _, id in ipairs(need) do add("     " .. ns.QuestTitle(id), id) end
-                if hidden > 0 then add("     " .. hidden .. (hidden == 1 and " class or race quest hidden" or " class or race quests hidden"), nil, MUTED) end
+                if hidden > 0 then add("     " .. hidden .. (hidden == 1 and " quest hidden: needs another class, race or profession" or " quests hidden: need another class, race or profession"), nil, MUTED) end
                 add("")
             end
         end
@@ -409,6 +409,11 @@ local function BuildQuests()
         if #clear > 0 then names("Nothing to do on: ", clear, GOOD) end
         if #waiting > 0 then names("Not synced yet: ", waiting, MUTED) end
         if #e == 0 then add("No pairs yet.", nil, MUTED) end
+        if mine and not ns.QuestDataReady() then
+            add("")
+            add("Questie isn't installed here, so class and profession", nil, MUTED)
+            add("quests can't be left out of these lists.", nil, MUTED)
+        end
         return e
     end
     function page:Refresh()

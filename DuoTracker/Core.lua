@@ -243,6 +243,8 @@ local function Snapshot(scanQuests)
     end
     local _, class = UnitClass("player")
     set("class", class)
+    local _, _, raceId = UnitRace("player")
+    set("race", raceId)
     set("level", UnitLevel("player"))
     set("xp", UnitXP("player"))
     set("xpmax", UnitXPMax("player"))
@@ -255,7 +257,8 @@ local function Snapshot(scanQuests)
         if step then set("step", step) end
         if steps then set("steps", steps) end
         local label = guideName and ((group or "") .. " / " .. guideName)
-        if label and label ~= lastGuideLabel then
+        -- RestedXP loads its guide a few seconds after login; only a loaded guide counts as read.
+        if label and guide and label ~= lastGuideLabel then
             lastGuideLabel = label
             local okLearn, added = pcall(LearnGuideQuests, c, group, guideName, guide)
             if okLearn and added then
@@ -299,8 +302,10 @@ local function Needs(need, have)
         if not need.done[id] and not db.ignored[id] and not untitled[id] then
             local gi = have.gq and have.gq[id]
             local label = gi and have.guides and have.guides[gi]
-            if label and HasGuide(need, label) and not (need.gq and need.gq[id]) then
-                hidden = hidden + 1 -- class or race quest: same guide, not in theirs
+            if ns.QuestBlock(id, need) then
+                hidden = hidden + 1 -- needs a class, race or profession they don't have
+            elseif label and HasGuide(need, label) and not (need.gq and need.gq[id]) then
+                hidden = hidden + 1 -- same guide, but RestedXP left it out of theirs
             else
                 list[#list + 1] = id
             end
@@ -579,7 +584,7 @@ end
 local function BuildStatus(key, c)
     return table.concat({ "S", esc(key), esc(c.name), esc(c.class), c.level or 0, c.xp or 0,
         c.xpmax or 0, esc(c.group), esc(c.guide), c.step or 0, c.steps or 0, esc(c.cfg),
-        c.rev or 0 }, "~")
+        c.rev or 0, c.race or 0 }, "~")
 end
 
 local function EncodeIds(ids, gq)
@@ -690,6 +695,8 @@ local function Handle(text, from)
         if c.steps == 0 then c.steps = nil end
         c.cfg = nilIfEmpty(unesc(f[12]))
         c.rev = tonumber(f[13])
+        c.race = tonumber(f[14]) -- absent from versions before 1.7.0
+        if c.race == 0 then c.race = nil end
         c.synced = time()
         AfterSync()
     elseif kind == "Q" and #f >= 6 then
