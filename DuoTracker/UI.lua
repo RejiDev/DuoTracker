@@ -1,13 +1,13 @@
--- Duo Tracker: the window with every pair, head to head.
+-- Duo Tracker: the window. Tabs across the top; each tab lists every pair.
 local ADDON, ns = ...
 
 local W = 880
-local TOP = 82           -- space above the first pair row
+local TOP = 110          -- space above the first pair row
 local ROW_H = 46
 local LINE_H = 16
 local VISIBLE = 9        -- detail lines shown at once
-local TAB_H = 26
-local DETAIL_H = TAB_H + VISIBLE * LINE_H + 16
+local DETAIL_H = VISIBLE * LINE_H + 16
+local NOTE_H = 30        -- extra room for the note box on the Notes tab
 local BAR_W = 190
 -- x positions inside a row (the row is W - 16 wide)
 local LEFT_EDGE, MID, RIGHT_EDGE, QUEST_EDGE = 276, 365, 454, 850
@@ -15,14 +15,23 @@ local LEFT_EDGE, MID, RIGHT_EDGE, QUEST_EDGE = 276, 365, 454, 850
 local GOLD = { 0.91, 0.78, 0.47 }
 local BODY = { 0.93, 0.89, 0.82 }
 local MUTED = { 0.71, 0.65, 0.55 }
+local ORANGE = { 0.95, 0.63, 0.33 }
 local WHITE = "Interface\\Buttons\\WHITE8X8"
 
-local TABS = { { "quests", "Quests" }, { "gear", "Gear" }, { "profs", "Professions" }, { "gold", "Gold" }, { "notes", "Notes" } }
-local tab = "quests"
+-- key, tab label, then the four column headings (%s is the partner's name)
+local TABS = {
+    { "overview", "Overview", "Yours", "Standing", "%s's", "Quests" },
+    { "quests", "Quests", "Yours", "Standing", "%s's", "" },
+    { "gear", "Gear", "Yours", "", "%s's", "Bag items" },
+    { "profs", "Professions", "Yours", "", "%s's", "Can craft" },
+    { "gold", "Gold", "Yours", "", "%s's", "Together" },
+    { "notes", "Notes", "Yours", "", "%s's", "" },
+}
+local tab = "overview"
 local tabButtons, noteBox = {}, nil
 local frame, info, detail, more, updateButton
 local headers, rows, lines = {}, {}, {}
-local selected, offset = nil, 0   -- selected: nil = pick a default, false = collapsed
+local selected, offset = false, 0   -- selected: index of the opened pair, or false
 
 local STATUS = {
     you = { "You're behind", 0.12, 0.10, 0.07 },
@@ -61,8 +70,9 @@ local function Bar(row)
     return track, fill
 end
 
-local function SetBar(fill, c)
-    local pct = ns.XPPercent(c)
+local function SetBar(track, fill, c, show)
+    local pct = show and ns.XPPercent(c) or 0
+    if show then track:Show() else track:Hide() end
     if pct <= 0 then
         fill:Hide()
     else
@@ -84,11 +94,13 @@ local function MakeRow(i)
     row.youName:SetPoint("TOPRIGHT", row, "TOPLEFT", LEFT_EDGE, -7)
     row.youLevel = FS(row, "GameFontHighlightSmall", "RIGHT", MUTED)
     row.youLevel:SetPoint("RIGHT", row.youName, "LEFT", -8, 0)
+    row.youSub = FS(row, "GameFontHighlightSmall", "RIGHT", MUTED)
+    row.youSub:SetPoint("TOPRIGHT", row, "TOPLEFT", LEFT_EDGE, -26)
     row.youTrack, row.youFill = Bar(row)
     row.youTrack:SetPoint("TOPRIGHT", row, "TOPLEFT", LEFT_EDGE, -30)
     row.youFill:SetPoint("RIGHT", row.youTrack, "RIGHT")
 
-    -- Standing in the middle
+    -- Middle
     row.pill = row:CreateTexture(nil, "ARTWORK")
     row.pill:SetColorTexture(0.95, 0.63, 0.33, 1)
     row.status = FS(row, "GameFontHighlightSmall", "CENTER")
@@ -103,16 +115,25 @@ local function MakeRow(i)
     row.themName:SetPoint("TOPLEFT", row, "TOPLEFT", RIGHT_EDGE, -7)
     row.themLevel = FS(row, "GameFontHighlightSmall", "LEFT", MUTED)
     row.themLevel:SetPoint("LEFT", row.themName, "RIGHT", 8, 0)
+    row.themSub = FS(row, "GameFontHighlightSmall", "LEFT", MUTED)
+    row.themSub:SetPoint("TOPLEFT", row, "TOPLEFT", RIGHT_EDGE, -26)
     row.themTrack, row.themFill = Bar(row)
     row.themTrack:SetPoint("TOPLEFT", row, "TOPLEFT", RIGHT_EDGE, -30)
     row.themFill:SetPoint("LEFT", row.themTrack, "LEFT")
 
-    row.quests = FS(row, "GameFontHighlightSmall", "RIGHT", BODY)
-    row.quests:SetPoint("RIGHT", row, "LEFT", QUEST_EDGE, 0)
+    row.far = FS(row, "GameFontHighlightSmall", "RIGHT", BODY)
+    row.far:SetPoint("RIGHT", row, "LEFT", QUEST_EDGE, 0)
+
+    -- Notes tab: the note runs under both names
+    row.note = FS(row, "GameFontHighlightSmall", "CENTER", BODY)
+    row.note:SetPoint("TOP", row, "TOPLEFT", MID, -26)
+    row.note:SetWidth(W - 80)
+    row.note:SetWordWrap(false)
 
     row:SetScript("OnClick", function()
         if selected == i then selected = false else selected = i end
         offset = 0
+        if noteBox then noteBox:Hide() end
         ns.RefreshUI()
     end)
     rows[i] = row
@@ -122,7 +143,7 @@ end
 local function MakeLine(i)
     local line = CreateFrame("Button", nil, detail)
     line:SetSize(W - 60, LINE_H)
-    line:SetPoint("TOPLEFT", 32, -(TAB_H + 8 + (i - 1) * LINE_H))
+    line:SetPoint("TOPLEFT", 32, -(8 + (i - 1) * LINE_H))
     line.text = FS(line, "GameFontHighlightSmall", "LEFT")
     line.text:SetPoint("LEFT")
     line.text:SetWidth(W - 60)
@@ -183,23 +204,37 @@ local function Build()
     end)
     updateButton:Hide()
 
+    -- Tabs across the top
+    for i, t in ipairs(TABS) do
+        local b = CreateFrame("Button", nil, frame)
+        b:SetSize(120, 24)
+        b:SetPoint("TOPLEFT", 12 + (i - 1) * 124, -58)
+        b.bg = b:CreateTexture(nil, "BACKGROUND")
+        b.bg:SetAllPoints()
+        b.text = FS(b, "GameFontHighlightSmall", "CENTER")
+        b.text:SetPoint("CENTER")
+        b.text:SetText(t[2])
+        b:SetScript("OnClick", function()
+            tab, offset = t[1], 0
+            if noteBox then noteBox:Hide() end
+            ns.RefreshUI()
+        end)
+        tabButtons[i] = b
+    end
     local rule = frame:CreateTexture(nil, "ARTWORK")
     rule:SetColorTexture(0.54, 0.42, 0.18, 1)
-    rule:SetPoint("TOPLEFT", 2, -56)
-    rule:SetPoint("TOPRIGHT", -2, -56)
+    rule:SetPoint("TOPLEFT", 2, -82)
+    rule:SetPoint("TOPRIGHT", -2, -82)
     rule:SetHeight(1)
 
-    headers.you = FS(frame, "GameFontNormalSmall", "RIGHT", GOLD)
-    headers.you:SetPoint("TOPRIGHT", frame, "TOPLEFT", 8 + LEFT_EDGE, -63)
-    headers.you:SetText("Yours")
-    headers.mid = FS(frame, "GameFontNormalSmall", "CENTER", GOLD)
-    headers.mid:SetPoint("TOP", frame, "TOPLEFT", 8 + MID, -63)
-    headers.mid:SetText("Standing")
-    headers.them = FS(frame, "GameFontNormalSmall", "LEFT", GOLD)
-    headers.them:SetPoint("TOPLEFT", frame, "TOPLEFT", 8 + RIGHT_EDGE, -63)
-    headers.quests = FS(frame, "GameFontNormalSmall", "RIGHT", GOLD)
-    headers.quests:SetPoint("TOPRIGHT", frame, "TOPLEFT", 8 + QUEST_EDGE, -63)
-    headers.quests:SetText("Quests")
+    headers[1] = FS(frame, "GameFontNormalSmall", "RIGHT", GOLD)
+    headers[1]:SetPoint("TOPRIGHT", frame, "TOPLEFT", 8 + LEFT_EDGE, -90)
+    headers[2] = FS(frame, "GameFontNormalSmall", "CENTER", GOLD)
+    headers[2]:SetPoint("TOP", frame, "TOPLEFT", 8 + MID, -90)
+    headers[3] = FS(frame, "GameFontNormalSmall", "LEFT", GOLD)
+    headers[3]:SetPoint("TOPLEFT", frame, "TOPLEFT", 8 + RIGHT_EDGE, -90)
+    headers[4] = FS(frame, "GameFontNormalSmall", "RIGHT", GOLD)
+    headers[4]:SetPoint("TOPRIGHT", frame, "TOPLEFT", 8 + QUEST_EDGE, -90)
 
     detail = CreateFrame("Frame", nil, frame, template)
     detail:SetSize(W - 16, DETAIL_H)
@@ -210,25 +245,9 @@ local function Build()
         ns.RefreshUI()
     end)
     more = FS(detail, "GameFontDisableSmall", "RIGHT", MUTED)
-    more:SetPoint("BOTTOMRIGHT", -8, 6)
+    more:SetPoint("TOPRIGHT", -8, -6)
     more:SetText("Scroll for more")
     for i = 1, VISIBLE do MakeLine(i) end
-
-    for i, t in ipairs(TABS) do
-        local b = CreateFrame("Button", nil, detail)
-        b:SetSize(112, 20)
-        b:SetPoint("TOPLEFT", 8 + (i - 1) * 116, -4)
-        b.bg = b:CreateTexture(nil, "BACKGROUND")
-        b.bg:SetAllPoints()
-        b.text = FS(b, "GameFontHighlightSmall", "CENTER")
-        b.text:SetPoint("CENTER")
-        b.text:SetText(t[2])
-        b:SetScript("OnClick", function()
-            tab, offset = t[1], 0
-            ns.RefreshUI()
-        end)
-        tabButtons[i] = b
-    end
 
     noteBox = CreateFrame("EditBox", nil, detail, "InputBoxTemplate")
     noteBox:SetSize(W - 120, 20)
@@ -334,50 +353,33 @@ local function NoteEntries(index, add)
     add("Type below and press Enter. Your partner sees it after the next sync.", nil, MUTED)
 end
 
-local function DetailEntries(r, index)
-    local e = {}
-    local function add(text, questId, color, itemId)
-        color = color or BODY
-        e[#e + 1] = { text = text, questId = questId, itemId = itemId, r = color[1], g = color[2], b = color[3] }
-    end
+local function OverviewEntries(r, add)
     local partner = ns.PartnerLabel()
-    if r.themName == "" then
-        add("This pair has no second character yet. Type: /duo pair " .. r.youName .. " = Character Name", nil, GOLD)
-        return e
-    end
-    if tab == "notes" then
-        NoteEntries(index, add)
-        return e
-    end
-    if r.status == "nodata" then
-        add("Waiting for data. Each character shows up once it has logged in with this addon and you've both been online.", nil, MUTED)
-        return e
-    end
-    if tab == "gear" then
-        GearEntries(r, add)
-        return e
-    elseif tab == "profs" then
-        ProfEntries(r, add)
-        return e
-    elseif tab == "gold" then
-        GoldEntries(r, add)
-        return e
-    end
+    local a, b = r.you, r.them
+    add(a.name .. " is level " .. a.level .. " (" .. ns.XPPercent(a) .. "%), " .. b.name .. " is level " ..
+        b.level .. " (" .. ns.XPPercent(b) .. "%).", nil, GOLD)
     if r.guideDiff then
-        add("Different RestedXP guides, so step numbers can't be compared.", nil, GOLD)
-        add("   Yours: " .. GuideLabel(r.you), nil, MUTED)
-        add("   " .. partner .. "'s: " .. GuideLabel(r.them), nil, MUTED)
-    elseif not (r.you.guide and r.them.guide) then
-        add("No RestedXP guide loaded on " .. (r.you.guide and r.themName or r.youName) .. ", so steps aren't compared.", nil, MUTED)
+        add("Different RestedXP guides, so step numbers can't be compared.", nil, ORANGE)
+        add("   Yours: " .. GuideLabel(a), nil, MUTED)
+        add("   " .. partner .. "'s: " .. GuideLabel(b), nil, MUTED)
+    elseif r.sameGuide then
+        add("Guide: " .. GuideLabel(a) .. ". Step " .. (a.step or "?") .. " and step " .. (b.step or "?") ..
+            (a.steps and (" of " .. a.steps) or "") .. ".")
+    else
+        add("No RestedXP guide loaded on " .. (a.guide and b.name or a.name) .. ", so steps aren't compared.", nil, MUTED)
     end
     if r.cfgDiff then
-        add("RestedXP settings differ, which can change the route.", nil, GOLD)
-        add("   Yours: " .. r.you.cfg, nil, MUTED)
-        add("   " .. partner .. "'s: " .. r.them.cfg, nil, MUTED)
+        add("RestedXP settings differ, which can change the route.", nil, ORANGE)
+        add("   Yours: " .. a.cfg, nil, MUTED)
+        add("   " .. partner .. "'s: " .. b.cfg, nil, MUTED)
     end
+    add("Last synced " .. ns.Ago(b.synced):lower() .. ". The other tabs have quests, gear, professions, gold and notes.", nil, MUTED)
+end
+
+local function QuestEntries(r, add)
     if not r.questsKnown then
         add("Quest lists haven't synced for this pair yet.", nil, MUTED)
-        return e
+        return
     end
     local function section(list, hidden, name)
         local note = hidden > 0 and ("  " .. hidden .. " class or race quests hidden.") or ""
@@ -391,7 +393,133 @@ local function DetailEntries(r, index)
     end
     section(r.youNeed, r.youHidden, r.youName)
     section(r.themNeed, r.themHidden, r.themName)
+end
+
+local function DetailEntries(r, index)
+    local e = {}
+    local function add(text, questId, color, itemId)
+        color = color or BODY
+        e[#e + 1] = { text = text, questId = questId, itemId = itemId, r = color[1], g = color[2], b = color[3] }
+    end
+    if r.themName == "" then
+        add("This pair has no second character yet. Type: /duo pair " .. r.youName .. " = Character Name", nil, GOLD)
+    elseif tab == "notes" then
+        NoteEntries(index, add)
+    elseif r.status == "nodata" then
+        add("Waiting for data. Each character shows up once it has logged in with this addon and you've both been online.", nil, MUTED)
+    elseif tab == "gear" then
+        GearEntries(r, add)
+    elseif tab == "profs" then
+        ProfEntries(r, add)
+    elseif tab == "gold" then
+        GoldEntries(r, add)
+    elseif tab == "quests" then
+        QuestEntries(r, add)
+    else
+        OverviewEntries(r, add)
+    end
     return e
+end
+
+local function Count(list)
+    return list and #list or 0
+end
+
+-- Fills the parts of a row that change with the tab.
+local function FillRow(row, r, index, partner)
+    local known = r.status ~= "nodata"
+    local youSub, themSub, far, note = "", "", "", ""
+    local showStanding = tab == "overview" or tab == "quests"
+    local overview = tab == "overview"
+
+    if tab == "overview" then
+        if known then
+            if not r.questsKnown then
+                far = "Not synced"
+            elseif #r.youNeed > 0 and #r.themNeed > 0 then
+                far = "You " .. #r.youNeed .. ", " .. partner .. " " .. #r.themNeed
+            elseif #r.youNeed > 0 then
+                far = "You need " .. #r.youNeed
+            elseif #r.themNeed > 0 then
+                far = partner .. " needs " .. #r.themNeed
+            else
+                far = "None"
+            end
+        end
+    elseif tab == "quests" then
+        if known and r.questsKnown then
+            youSub = #r.youNeed == 0 and "Nothing to catch up" or (#r.youNeed .. " to catch up")
+            themSub = #r.themNeed == 0 and "Nothing to catch up" or (#r.themNeed .. " to catch up")
+        elseif known then
+            youSub, themSub = "Not synced", "Not synced"
+        end
+    elseif tab == "gear" then
+        local function sub(c)
+            local g = ns.GearSummary(c)
+            if not g then return c and "Not synced" or "" end
+            return "Item level " .. g.avg .. (g.weakest and (", weakest " .. g.weakest .. " " .. g.weakestLevel) or "")
+        end
+        youSub, themSub = sub(r.you), sub(r.them)
+        if known then
+            local n = Count(ns.HandMeDowns(r.you, r.them)) + Count(ns.HandMeDowns(r.them, r.you))
+            far = n > 0 and ("|cfff2a154" .. n .. " to hand over|r") or "Nothing"
+        end
+    elseif tab == "profs" then
+        local function sub(c)
+            if not (c and c.x) then return c and "Not synced" or "" end
+            local parts = {}
+            for i, p in ipairs(c.x.profs) do parts[i] = p[1] .. " " .. p[2] end
+            return #parts > 0 and table.concat(parts, ", ") or "No professions"
+        end
+        youSub, themSub = sub(r.you), sub(r.them)
+        if known then
+            local n = Count(ns.CanCraft(r.you, r.them)) + Count(ns.CanCraft(r.them, r.you))
+            far = n > 0 and ("|cfff2a154" .. n .. " upgrades|r") or "Nothing"
+        end
+    elseif tab == "gold" then
+        local function sub(c)
+            if not (c and c.x) then return c and "Not synced" or "" end
+            return ns.Money(c.x.gold)
+        end
+        youSub, themSub = sub(r.you), sub(r.them)
+        if r.you and r.you.x and r.them and r.them.x then
+            far = ns.Money((r.you.x.gold or 0) + (r.them.x.gold or 0))
+        end
+    elseif tab == "notes" then
+        local n = ns.db.notes[ns.PairKey(index) or ""]
+        note = n and n.text ~= "" and n.text or "|cffb5a68cNo note|r"
+    end
+
+    row.youSub:SetText(youSub)
+    row.themSub:SetText(themSub)
+    row.far:SetText(far)
+    row.note:SetText(note)
+    row.youLevel:SetText(r.you and r.you.level and ("Level " .. r.you.level) or "Not seen yet")
+    row.themLevel:SetText(r.themName == "" and "/duo pair to set" or
+        (r.them and r.them.level and ("Level " .. r.them.level) or "Not seen yet"))
+    SetBar(row.youTrack, row.youFill, r.you, overview)
+    SetBar(row.themTrack, row.themFill, r.them, overview)
+
+    local step = ""
+    if overview and known then
+        if r.guideDiff then
+            step = "|cffe9c877Different guides|r"
+        elseif r.sameGuide then
+            step = "Step " .. (r.you.step or "?") .. " / " .. (r.them.step or "?")
+        else
+            step = "No guide"
+        end
+    end
+    row.step:SetText(step)
+    if showStanding then
+        local s = STATUS[r.status]
+        row.status:SetText(s[1]:format(partner))
+        row.status:SetTextColor(s[2], s[3], s[4])
+        if r.status == "you" then row.pill:Show() else row.pill:Hide() end
+    else
+        row.status:SetText("")
+        row.pill:Hide()
+    end
 end
 
 function ns.RefreshUI()
@@ -399,11 +527,8 @@ function ns.RefreshUI()
     local db = ns.db
     local partner = ns.PartnerLabel()
     local n = #db.pairs
-    if selected == nil or (selected and selected > n) then
-        selected = ns.PairIndexFor(db.chars[ns.PlayerKey()]) or false
-    end
+    if selected and selected > n then selected = false end
 
-    headers.them:SetText(partner .. "'s")
     info:SetText((ns.PartnerOnline() and (partner .. " is online. ") or (partner .. " is offline. ")) ..
         "Last sync: " .. ns.Ago(db.lastSync):lower() .. ".")
     if ns.updateAvailable then
@@ -412,7 +537,19 @@ function ns.RefreshUI()
     else
         updateButton:Hide()
     end
+    for i, t in ipairs(TABS) do
+        local b = tabButtons[i]
+        if t[1] == tab then
+            b.bg:SetColorTexture(0.54, 0.42, 0.18, 1)
+            b.text:SetTextColor(1, 0.95, 0.79)
+            for h = 1, 4 do headers[h]:SetText((t[h + 2]:format(partner))) end
+        else
+            b.bg:SetColorTexture(0.165, 0.13, 0.098, 1)
+            b.text:SetTextColor(MUTED[1], MUTED[2], MUTED[3])
+        end
+    end
 
+    local detailH = DETAIL_H + (tab == "notes" and NOTE_H or 0)
     local y, chosen = TOP, nil
     detail:Hide()
     for i = 1, math.max(n, #rows) do
@@ -430,68 +567,26 @@ function ns.RefreshUI()
                 row.bg:SetColorTexture(0.91, 0.78, 0.47, 0.14)
                 detail:ClearAllPoints()
                 detail:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -y)
+                detail:SetHeight(detailH)
                 detail:Show()
-                y = y + DETAIL_H
+                y = y + detailH
             elseif i % 2 == 1 then
                 row.bg:SetColorTexture(0.165, 0.13, 0.098, 1)
             else
                 row.bg:SetColorTexture(0, 0, 0, 0)
             end
-
             row.youName:SetText(r.youName)
             row.youName:SetTextColor(ClassColor(r.you))
-            row.youLevel:SetText(r.you and r.you.level and ("Level " .. r.you.level) or "Not seen yet")
-            SetBar(row.youFill, r.you)
             row.themName:SetText(r.themName ~= "" and r.themName or "Not set")
             row.themName:SetTextColor(ClassColor(r.them))
-            row.themLevel:SetText(r.themName == "" and "/duo pair to set" or
-                (r.them and r.them.level and ("Level " .. r.them.level) or "Not seen yet"))
-            SetBar(row.themFill, r.them)
-
-            local step, quests = "", ""
-            if r.status ~= "nodata" then
-                if r.guideDiff then
-                    step = "|cffe9c877Different guides|r"
-                elseif r.sameGuide then
-                    step = "Step " .. (r.you.step or "?") .. " / " .. (r.them.step or "?")
-                else
-                    step = "No guide"
-                end
-                if not r.questsKnown then
-                    quests = "Not synced"
-                elseif #r.youNeed > 0 and #r.themNeed > 0 then
-                    quests = "You " .. #r.youNeed .. ", " .. partner .. " " .. #r.themNeed
-                elseif #r.youNeed > 0 then
-                    quests = "You need " .. #r.youNeed
-                elseif #r.themNeed > 0 then
-                    quests = partner .. " needs " .. #r.themNeed
-                else
-                    quests = "None"
-                end
-            end
-            row.step:SetText(step)
-            row.quests:SetText(quests)
-            local s = STATUS[r.status]
-            row.status:SetText(s[1]:format(partner))
-            row.status:SetTextColor(s[2], s[3], s[4])
-            if r.status == "you" then row.pill:Show() else row.pill:Hide() end
+            FillRow(row, r, i, partner)
         end
     end
     frame:SetHeight(y + 10)
 
-    for i, t in ipairs(TABS) do
-        local b = tabButtons[i]
-        if t[1] == tab then
-            b.bg:SetColorTexture(0.54, 0.42, 0.18, 0.55)
-            b.text:SetTextColor(1, 0.93, 0.75)
-        else
-            b.bg:SetColorTexture(1, 1, 1, 0.05)
-            b.text:SetTextColor(MUTED[1], MUTED[2], MUTED[3])
-        end
-    end
     if chosen and tab == "notes" and chosen.themName ~= "" then
         if not noteBox:IsShown() then
-            local note = ns.db.notes[ns.PairKey(selected) or ""]
+            local note = db.notes[ns.PairKey(selected) or ""]
             noteBox:SetText(note and note.text or "")
             noteBox:Show()
         end
@@ -522,7 +617,7 @@ function ns.ToggleUI()
     if frame:IsShown() then
         frame:Hide()
     else
-        selected, offset = nil, 0
+        offset = 0
         frame:Show()
         ns.RefreshUI()
     end
