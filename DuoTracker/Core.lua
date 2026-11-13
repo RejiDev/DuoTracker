@@ -101,6 +101,7 @@ end
 
 local function Changed()
     if ns.RefreshUI then ns.RefreshUI() end
+    if ns.UpdateBadge then ns.UpdateBadge() end
 end
 
 ------------------------------------------------------------------------
@@ -428,6 +429,9 @@ local function SummaryLines()
     return lines
 end
 
+ns.SummaryLines = SummaryLines
+ns.MyVersion = MyVersion
+
 local function PrintSummaryNow(onlyIfNew)
     local lines = SummaryLines()
     if not lines then
@@ -702,6 +706,14 @@ local function TryHello(force)
     return false
 end
 
+function ns.Sync()
+    if TryHello(true) then
+        Print("Syncing with " .. ns.PartnerLabel() .. ".")
+    else
+        Print(ns.PartnerLabel() .. " isn't online on WoW Forever, so there's nothing to sync with yet.")
+    end
+end
+
 function ns.PartnerOnline()
     return partner ~= nil
 end
@@ -723,6 +735,7 @@ local function InitDB()
     db = DuoTrackerDB
     db.chars = db.chars or {}
     db.ignored = db.ignored or {}
+    db.minimap = db.minimap or {}
     if not db.pairs then
         db.pairs = {}
         for i, p in ipairs(ns.DEFAULT_PAIRS) do db.pairs[i] = { p[1], p[2] } end
@@ -750,11 +763,7 @@ local function Slash(msg)
     if cmd == "" then
         if ns.ToggleUI then ns.ToggleUI() end
     elseif cmd == "sync" then
-        if TryHello(true) then
-            Print("Syncing with " .. ns.PartnerLabel() .. ".")
-        else
-            Print(ns.PartnerLabel() .. " isn't online on WoW Forever, so there's nothing to sync with yet.")
-        end
+        ns.Sync()
     elseif cmd == "status" then
         ns.PrintSummary(false)
     elseif cmd == "pair" then
@@ -791,6 +800,10 @@ local function Slash(msg)
         db.partnerName = rest
         Print("Your partner now shows as " .. rest .. ".")
         Changed()
+    elseif cmd == "minimap" then
+        db.minimap.hide = not db.minimap.hide
+        if ns.ShowMinimapButton then ns.ShowMinimapButton(not db.minimap.hide) end
+        Print("Minimap button " .. (db.minimap.hide and "hidden." or "shown."))
     elseif cmd == "unignore" then
         db.ignored = {}
         Print("All ignored quests are showing again.")
@@ -803,6 +816,7 @@ local function Slash(msg)
         Print("/duo name Mark - what to call your partner")
         Print("/duo partner Name#1234 - set your partner's BattleTag by hand, /duo partner reset")
         Print("/duo unignore - show ignored quests again")
+        Print("/duo minimap - show or hide the minimap button")
     end
 end
 
@@ -822,6 +836,7 @@ events:SetScript("OnEvent", function(_, event, ...)
             pcall(events.RegisterEvent, events, e)
         end
         Snapshot(true)
+        if ns.CreateMinimapButton then pcall(ns.CreateMinimapButton) end
         C_Timer.NewTicker(SEND_INTERVAL, Pump)
         local ticks = 0
         C_Timer.NewTicker(5, function()
