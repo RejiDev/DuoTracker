@@ -322,6 +322,44 @@ local function MySide()
     return votes < 0 and 2 or 1
 end
 
+-- Characters are shown by class rather than by name. These are the classes of
+-- the built-in pairs, used until a character has logged in and reported its own.
+local KNOWN_CLASS = {
+    holycowabunga = "DRUID", burtbacharach = "HUNTER", marksmum = "ROGUE", rejismum = "WARRIOR",
+    rejiplanty = "WARRIOR", marjoriedawes = "ROGUE", marksdad = "WARLOCK", priestpriestington = "PRIEST",
+    marksfriend = "PALADIN", mooeymooerson = "SHAMAN", markschild = "PRIEST", rejisdad = "PALADIN",
+    grumpyrunt = "MAGE", dudemcdrude = "DRUID", marksuncle = "HUNTER",
+}
+
+local function ClassOf(c, name)
+    return (c and c.class) or KNOWN_CLASS[norm(name)]
+end
+
+local function ClassName(token)
+    local names = LOCALIZED_CLASS_NAMES_MALE
+    return (names and names[token]) or (token:sub(1, 1) .. token:sub(2):lower())
+end
+
+-- "Druid", or "Druid (Holy)" when the same account has two of that class in the pair list.
+local function ShortLabel(c, name, column)
+    local class = ClassOf(c, name)
+    if not class or name == "" then return name end
+    local same = 0
+    for _, p in ipairs(db.pairs) do
+        local other = p[column]
+        if other and other ~= "" and ClassOf(db.chars[norm(other)], other) == class then same = same + 1 end
+    end
+    local label = ClassName(class)
+    if same > 1 then label = label .. " (" .. (name:match("^%s*(%S+)") or name) .. ")" end
+    return label
+end
+
+-- Mid-sentence form of a character's long label: "your Druid", "Mark's Hunter".
+function ns.Mid(c)
+    local long = c and (c.long or c.name) or "?"
+    return (long:gsub("^Your ", "your "))
+end
+
 function ns.Compare(index)
     local p = db.pairs[index]
     if not p then return nil end
@@ -329,6 +367,7 @@ function ns.Compare(index)
     local a, b = db.chars[norm(nameA)], db.chars[norm(nameB)]
     if nameA == "" then a = nil end
     if nameB == "" then b = nil end
+    local columnA, columnB = 1, 2
     local swap
     if (a and a.mine) or (b and not b.mine) then
         swap = false
@@ -340,11 +379,20 @@ function ns.Compare(index)
     if swap then
         a, b = b, a
         nameA, nameB = nameB, nameA
+        columnA, columnB = 2, 1
     end
+    local youLabel = ShortLabel(a, a and a.name or nameA, columnA)
+    local themLabel = ShortLabel(b, b and b.name or nameB, columnB)
+    local youLong = "Your " .. youLabel
+    local themLong = nameB ~= "" and (ns.PartnerLabel() .. "'s " .. themLabel) or ""
+    if a then a.short, a.long = youLabel, youLong end
+    if b then b.short, b.long = themLabel, themLong end
     local r = {
         you = a, them = b,
         youName = a and a.name or nameA,
         themName = b and b.name or nameB,
+        youLabel = youLabel, themLabel = themLabel, youLong = youLong, themLong = themLong,
+        youClass = ClassOf(a, nameA), themClass = ClassOf(b, nameB),
         youNeed = {}, themNeed = {}, youHidden = 0, themHidden = 0,
         status = "nodata",
     }
@@ -432,11 +480,11 @@ local function SummaryLines()
     local r = ns.Compare(i)
     local lines = {}
     if r.status == "nodata" then
-        local other = r.themName ~= "" and r.themName or "your partner's character"
+        local other = r.themName ~= "" and r.themLong or "your partner's character"
         lines[1] = "No data for " .. other .. " yet. It syncs when you're both online."
         return lines
     end
-    lines[1] = r.youName .. " and " .. r.themName .. ", synced " .. ns.Ago(r.them.synced):lower() .. "."
+    lines[1] = r.youLong .. " and " .. r.themLong .. ", synced " .. ns.Ago(r.them.synced):lower() .. "."
     local a, b = r.you, r.them
     local detail = "level " .. a.level .. " vs " .. b.level
     if r.sameGuide and a.step and b.step then

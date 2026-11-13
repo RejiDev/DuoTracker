@@ -357,7 +357,7 @@ local function Wearables(forChar, fromChar, ids, onlyUpgrades)
                     text = text .. " (not an upgrade)"
                 end
                 if item.minLevel > (forChar.level or 1) then text = text .. ", needs level " .. item.minLevel end
-                if cant then text = text .. ". " .. fromChar.name .. " can't use it" end
+                if cant then text = text .. ". " .. (fromChar.long or fromChar.name) .. " can't use it" end
                 list[#list + 1] = { id = id, text = text, gain = upgrade and (item.ilvl - current) or -1 }
             end
         end

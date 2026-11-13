@@ -37,16 +37,17 @@ local STATUS = {
 -- Small building blocks
 ------------------------------------------------------------------------
 
-local function ClassColor(c)
-    local col = c and c.class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[c.class]
+local function ClassColor(c, class)
+    class = (c and c.class) or class
+    local col = class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[class]
     if col then return col.r, col.g, col.b end
     return BODY[1], BODY[2], BODY[3]
 end
 
-local function Colored(c, name)
-    local r, g, b = ClassColor(c)
+local function Colored(c, name, class)
+    local r, g, b = ClassColor(c, class)
     return string.format("|cff%02x%02x%02x%s|r", math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5),
-        math.floor(b * 255 + 0.5), name or (c and c.name) or "?")
+        math.floor(b * 255 + 0.5), name or (c and (c.short or c.name)) or "?")
 end
 
 local function FS(parent, font, justify, color)
@@ -241,7 +242,7 @@ end
 local function OverviewEntries(r, add)
     local partner = ns.PartnerLabel()
     local a, b = r.you, r.them
-    add(a.name .. " is level " .. a.level .. " (" .. ns.XPPercent(a) .. "%), " .. b.name .. " is level " ..
+    add(a.long .. " is level " .. a.level .. " (" .. ns.XPPercent(a) .. "%), " .. b.long .. " is level " ..
         b.level .. " (" .. ns.XPPercent(b) .. "%).", nil, GOLD)
     if r.guideDiff then
         add("Different RestedXP guides, so step numbers can't be compared.", nil, ORANGE)
@@ -251,7 +252,7 @@ local function OverviewEntries(r, add)
         add("Guide: " .. GuideLabel(a) .. ". Step " .. (a.step or "?") .. " and step " .. (b.step or "?") ..
             (a.steps and (" of " .. a.steps) or "") .. ".")
     else
-        add("No RestedXP guide loaded on " .. (a.guide and b.name or a.name) .. ", so steps aren't compared.", nil, MUTED)
+        add("No RestedXP guide loaded on " .. ns.Mid(a.guide and b or a) .. ", so steps aren't compared.", nil, MUTED)
     end
     if r.cfgDiff then
         add("RestedXP settings differ, which can change the route.", nil, ORANGE)
@@ -316,12 +317,12 @@ local function BuildOverview()
             row.far:SetPoint("RIGHT", row, "LEFT", FAR_EDGE, 0)
         end,
         fill = function(row, r, _, partner)
-            row.youName:SetText(r.youName)
-            row.youName:SetTextColor(ClassColor(r.you))
+            row.youName:SetText(r.youLabel)
+            row.youName:SetTextColor(ClassColor(r.you, r.youClass))
             row.youLevel:SetText(LevelText(r.you, r.youName))
             SetXPBar(row.youFill, r.you)
-            row.themName:SetText(r.themName ~= "" and r.themName or "Not set")
-            row.themName:SetTextColor(ClassColor(r.them))
+            row.themName:SetText(r.themName ~= "" and r.themLabel or "Not set")
+            row.themName:SetTextColor(ClassColor(r.them, r.themClass))
             row.themLevel:SetText(LevelText(r.them, r.themName))
             SetXPBar(row.themFill, r.them)
             local step, far = "", ""
@@ -388,12 +389,12 @@ local function BuildQuests()
             local need, hidden = r.youNeed, r.youHidden
             if not mine then c, other, need, hidden = r.them, r.you, r.themNeed, r.themHidden end
             if r.status == "nodata" or not r.questsKnown then
-                local name = mine and r.youName or r.themName
+                local name = mine and r.youLabel or r.themLabel
                 if name ~= "" then waiting[#waiting + 1] = name end
             elseif #need == 0 then
-                clear[#clear + 1] = c.name
+                clear[#clear + 1] = c.short
             else
-                add(Colored(c) .. "  |cfff2a154" .. #need .. " to catch up with " .. other.name .. "|r")
+                add(Colored(c) .. "  |cfff2a154" .. #need .. " to catch up with " .. ns.Mid(other) .. "|r")
                 for _, id in ipairs(need) do add("     " .. ns.QuestTitle(id), id) end
                 if hidden > 0 then add("     " .. hidden .. (hidden == 1 and " class or race quest hidden" or " class or race quests hidden"), nil, MUTED) end
                 add("")
@@ -506,9 +507,9 @@ local function BuildGear()
         if not list then
             add("")
         elseif #list == 0 then
-            add("Nothing in " .. other.name .. "'s bags for " .. c.name .. ".", nil, MUTED)
+            add(other.long .. " is carrying nothing for " .. ns.Mid(c) .. ".", nil, MUTED)
         else
-            add("From " .. other.name .. "'s bags (" .. #list .. "):", nil, GOLD)
+            add(other.long .. " is carrying (" .. #list .. "):", nil, GOLD)
             for _, it in ipairs(list) do add("   " .. it.text, nil, BODY, it.id) end
         end
         p.gifts:Set(e)
@@ -541,7 +542,7 @@ local function BuildGear()
             else
                 local r = ns.Compare(i)
                 chip:Show()
-                chip.text:SetText(FirstWord(r.youName) .. (r.themName ~= "" and (" + " .. FirstWord(r.themName)) or ""))
+                chip.text:SetText(r.youLabel .. (r.themName ~= "" and (" + " .. r.themLabel) or ""))
                 if i == self.selected then
                     chip.bg:SetColorTexture(0.54, 0.42, 0.18, 1)
                     chip.text:SetTextColor(1, 0.95, 0.79)
@@ -553,8 +554,8 @@ local function BuildGear()
         end
         local r = ns.Compare(self.selected)
         if r then
-            fill(self.a, r.you, r.youName, r.them)
-            fill(self.b, r.them, r.themName, r.you)
+            fill(self.a, r.you, r.youLabel, r.them)
+            fill(self.b, r.them, r.themName ~= "" and r.themLabel or "", r.you)
         end
         return panelTop + 20 + #ns.SLOTS * 15 + 4 + 4 * LINE_H + 16 + 10
     end
@@ -569,12 +570,12 @@ local PROF_W = 150
 local function ProfEntries(r, add)
     for _, c in ipairs({ r.you, r.them }) do
         if not c.x then
-            add(c.name .. ": professions haven't synced yet.", nil, MUTED)
+            add(c.long .. ": professions haven't synced yet.", nil, MUTED)
         elseif #c.x.profs == 0 then
-            add(c.name .. ": no professions.", nil, GOLD)
+            add(c.long .. ": no professions.", nil, GOLD)
         else
             local cap = ns.SkillCap(c.level)
-            add(c.name .. " (level " .. (c.level or "?") .. ", can reach " .. cap .. "):", nil, GOLD)
+            add(c.long .. " (level " .. (c.level or "?") .. ", can reach " .. cap .. "):", nil, GOLD)
             for _, p in ipairs(c.x.profs) do
                 local text = "   " .. p[1] .. " " .. p[2] .. " / " .. p[3]
                 if p[2] >= cap and cap > 0 then
@@ -589,7 +590,7 @@ local function ProfEntries(r, add)
     local function craft(forChar, fromChar)
         local list = ns.CanCraft(forChar, fromChar)
         if not list or #list == 0 then return end
-        add(fromChar.name .. " can craft for " .. forChar.name .. " (" .. #list .. "):", nil, GOLD)
+        add(fromChar.long .. " can craft for " .. ns.Mid(forChar) .. " (" .. #list .. "):", nil, GOLD)
         for _, it in ipairs(list) do add("   " .. it.text, nil, BODY, it.id) end
     end
     craft(r.you, r.them)
@@ -677,10 +678,10 @@ local function BuildProfs()
             row.youBars, row.themBars = bars(row, true), bars(row, false)
         end,
         fill = function(row, r)
-            row.youName:SetText(r.youName)
-            row.youName:SetTextColor(ClassColor(r.you))
-            row.themName:SetText(r.themName ~= "" and r.themName or "Not set")
-            row.themName:SetTextColor(ClassColor(r.them))
+            row.youName:SetText(r.youLabel)
+            row.youName:SetTextColor(ClassColor(r.you, r.youClass))
+            row.themName:SetText(r.themName ~= "" and r.themLabel or "Not set")
+            row.themName:SetTextColor(ClassColor(r.them, r.themClass))
             setBars(row.youBars, r.you, true)
             setBars(row.themBars, r.them, false)
         end,
@@ -708,7 +709,7 @@ local FREE_MOUNT = { PALADIN = true, WARLOCK = true }
 local function GoldEntries(r, add)
     for _, c in ipairs({ r.you, r.them }) do
         local line = ns.MountLine(c)
-        if line then add(c.name .. ": " .. line) else add(c.name .. ": gold hasn't synced yet.", nil, MUTED) end
+        if line then add(c.long .. ": " .. line) else add(c.long .. ": gold hasn't synced yet.", nil, MUTED) end
     end
 end
 
@@ -781,8 +782,8 @@ local function BuildGold()
             row.total:SetPoint("RIGHT", row, "LEFT", FAR_EDGE + 6, 0)
         end,
         fill = function(row, r)
-            local a = setSide(row.you, r.you, r.youName)
-            local b = setSide(row.them, r.them, r.themName)
+            local a = setSide(row.you, r.you, r.youLabel)
+            local b = setSide(row.them, r.them, r.themName ~= "" and r.themLabel or "")
             row.total:SetText((r.you and r.you.x and r.them and r.them.x) and ns.Money(a + b) or "")
         end,
     })
@@ -870,12 +871,13 @@ local function BuildNotes()
                 local r = ns.Compare(i)
                 local note = ns.db.notes[ns.PairKey(i) or ""]
                 card:Show()
-                card.names:SetText(Colored(r.you, r.youName) .. (r.themName ~= "" and
-                    (" |cffb5a68cand|r " .. Colored(r.them, r.themName)) or ""))
+                card.names:SetText(Colored(r.you, r.youLong, r.youClass) .. (r.themName ~= "" and
+                    (" |cffb5a68cand|r " .. Colored(r.them, r.themLong, r.themClass)) or ""))
                 if note and note.text ~= "" then
                     card.text:SetText(note.text)
                     card.text:SetTextColor(BODY[1], BODY[2], BODY[3])
-                    card.by:SetText((note.by or "?") .. ", " .. ns.Ago(note.t):lower())
+                    local writer = ns.db.chars[ns.norm(note.by)]
+                    card.by:SetText((writer and writer.long or note.by or "?") .. ", " .. ns.Ago(note.t):lower())
                 else
                     card.text:SetText("No note. Click to write one.")
                     card.text:SetTextColor(MUTED[1], MUTED[2], MUTED[3])
