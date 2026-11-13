@@ -259,7 +259,7 @@ function ns.RefreshUI()
     local partner = ns.PartnerLabel()
     local n = #db.pairs
     if selected == nil or (selected and selected > n) then
-        selected = ns.PairIndexFor(db.chars[ns.norm(UnitName("player"))]) or false
+        selected = ns.PairIndexFor(db.chars[ns.PlayerKey()]) or false
     end
 
     headers.them:SetText(partner .. "'s")

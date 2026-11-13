@@ -114,6 +114,20 @@ local function plain(v)
     return v
 end
 
+-- WoW Forever characters have a first name and a surname. UnitName returns
+-- them as two values, so they are joined here ("Holy", "Cowabunga").
+local function FullName(unit)
+    local first, last = UnitName(unit)
+    first, last = plain(first), plain(last)
+    if type(first) ~= "string" or first == "" then return nil end
+    if type(last) == "string" and last ~= "" then return first .. " " .. last end
+    return first
+end
+
+function ns.PlayerKey()
+    return norm(FullName("player"))
+end
+
 local function ReadRXP()
     local R, cd = _G.RXP, _G.RXPCData
     local group, name, step, steps, guide
@@ -211,7 +225,7 @@ end
 
 local lastGuideLabel
 local function Snapshot(scanQuests)
-    local name = plain(UnitName("player"))
+    local name = FullName("player")
     if not name then return end
     local key = norm(name)
     local c = db.chars[key] or {}
@@ -631,12 +645,25 @@ end
 -- Finding the partner
 ------------------------------------------------------------------------
 
+local function FirstWord(name)
+    return norm(tostring(name or ""):match("^%s*(%S+)"))
+end
+
+-- Names of the partner's paired characters. Battle.net may report only the
+-- first name, so first names are included unless one of yours shares it.
 local function PairNames()
-    local names = {}
+    local names, myFirst = {}, {}
+    for _, c in pairs(db.chars) do
+        if c.mine then myFirst[FirstWord(c.name)] = true end
+    end
     for _, p in ipairs(db.pairs) do
         for n = 1, 2 do
             local key = norm(p[n])
-            if key ~= "" and not (db.chars[key] and db.chars[key].mine) then names[key] = true end
+            if key ~= "" and not (db.chars[key] and db.chars[key].mine) then
+                names[key] = true
+                local first = FirstWord(p[n])
+                if first ~= "" and not myFirst[first] then names[first] = true end
+            end
         end
     end
     return names
@@ -678,7 +705,7 @@ local function PartyHasPartner()
     if not (IsInGroup and IsInGroup()) then return false end
     local names = PairNames()
     for i = 1, 4 do
-        local name = plain(UnitName("party" .. i))
+        local name = FullName("party" .. i)
         if name and names[norm(name)] then return true end
     end
     return false
@@ -733,6 +760,10 @@ end
 local function InitDB()
     DuoTrackerDB = DuoTrackerDB or {}
     db = DuoTrackerDB
+    if db.schema ~= 2 then
+        db.chars = {} -- earlier versions stored characters under their first name only
+        db.schema = 2
+    end
     db.chars = db.chars or {}
     db.ignored = db.ignored or {}
     db.minimap = db.minimap or {}

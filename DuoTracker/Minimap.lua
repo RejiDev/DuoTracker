@@ -28,7 +28,7 @@ end
 -- Orange dot when the character you're on is behind.
 function ns.UpdateBadge()
     if not dot then return end
-    local i = ns.PairIndexFor(ns.db.chars[ns.norm(UnitName("player"))])
+    local i = ns.PairIndexFor(ns.db.chars[ns.PlayerKey()])
     local r = i and ns.Compare(i)
     if r and (r.status == "you" or r.status == "mixed") then dot:Show() else dot:Hide() end
 end
