@@ -65,7 +65,8 @@ C_Timer = {
 local stubMeta = {}
 local function stub() return setmetatable({}, stubMeta) end
 stubMeta.__index = function(self, key)
-    if type(key) == "string" and key:sub(1, 1) == "_" then return nil end -- the stub's own fields
+    -- Game methods start with a capital letter; anything else is a field the addon sets itself.
+    if type(key) ~= "string" or not key:match("^%u") then return nil end
     if key == "RegisterEvent" then
         return function(f, e) f._events = f._events or {}; f._events[e] = true end
     elseif key == "UnregisterEvent" then
@@ -316,6 +317,12 @@ def sync_pair(version_a, version_b, transport="bn", break_mark_refresh=False):
             check("%s's addon raised no Lua errors" % p.name, not errs, "; ".join(errs[:3]))
     for p in (reji, mark):
         if p.version == "current":
+            p.ns.ToggleUI()
+            for tab in ("overview", "gear", "profs", "gold", "notes"):
+                p.ns.ShowTab(tab)
+            err = p.db().sync.refreshError
+            if not break_mark_refresh or p is reji:
+                check("%s's window draws every tab" % p.name, err is None, str(err and err.err))
             st = p.db().sync
             check("%s's addon recorded the last message in" % p.name, st.lastIn is not None)
             drops = [k for k in st.drops] if st.drops else []

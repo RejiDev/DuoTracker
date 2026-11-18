@@ -873,10 +873,7 @@ local function Build()
         b.text = FS(b, "GameFontHighlightSmall", "CENTER")
         b.text:SetPoint("CENTER")
         b.text:SetText(t[2])
-        b:SetScript("OnClick", function()
-            tab = t[1]
-            ns.RefreshUI()
-        end)
+        b:SetScript("OnClick", function() ns.ShowTab(t[1]) end)
         tabButtons[i] = b
     end
     local rule = Tex(frame, "ARTWORK", 0.54, 0.42, 0.18, 1)
@@ -926,6 +923,12 @@ function ns.RefreshUI()
             page:Hide()
         end
     end
+end
+
+-- Switches the window to one of the TABS by its id ("overview", "gear", ...).
+function ns.ShowTab(id)
+    tab = id
+    ns.RefreshUI()
 end
 
 function ns.ToggleUI()

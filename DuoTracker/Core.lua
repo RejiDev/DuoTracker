@@ -3,9 +3,10 @@ local ADDON, ns = ...
 
 local PREFIX = "DuoTrk"
 local PROTO = 1
--- Bytes of payload per message. The client has no call that reports these limits:
--- party addon messages take 255 bytes, Battle.net game data 4078 (less our header).
-local CHUNK = { BN = 4000, PARTY = 220 }
+-- Bytes of payload per message part. The client has no call that reports the limit:
+-- party messages take 255 bytes. Battle.net takes 4078 but ChatThrottleLib keeps it to
+-- 255 for traffic fairness, and 220 is what sync has always worked with, so both use it.
+local CHUNK = { BN = 220, PARTY = 220 }
 local SEND_INTERVAL = 0.25 -- seconds between outgoing messages
 
 -- The built-in pairs. Either side of a pair can be yours; the addon works out
@@ -466,8 +467,9 @@ local function Pump()
     if not item then return end
     local target, text = item[1], item[2]
     if target.kind == "BN" then
-        local ok, err = pcall(BNSendGameData, target.id, PREFIX, text)
-        if not ok then Drop(DROP.SEND_ERROR, err) end
+        local ok, result = pcall(BNSendGameData, target.id, PREFIX, text)
+        db.sync.bnResult = { at = time(), result = tostring(result) } -- kept raw: its meaning isn't documented
+        if not ok then Drop(DROP.SEND_ERROR, result) end
     elseif target.kind == "PARTY" then
         if not (IsInGroup and IsInGroup()) then
             Drop(DROP.NOT_IN_GROUP)
@@ -763,7 +765,8 @@ function ns.SyncReport()
     lines[#lines + 1] = "Last hello sent " .. ns.Ago(st.lastHelloOut):lower() .. "; last message from " .. who .. " " ..
         (st.lastIn and (ns.Ago(st.lastIn.at):lower() .. " (" .. tostring(st.lastIn.kind) .. ")") or "never") .. "."
     lines[#lines + 1] = who .. "'s version " .. tostring(st.partnerVersion or "unknown") .. ", yours " .. MyVersion() ..
-        ". Waiting to send: " .. #queue .. " part(s)."
+        ". Waiting to send: " .. #queue .. " part(s)." ..
+        (st.bnResult and (" Last Battle.net send returned " .. st.bnResult.result .. ".") or "")
     local reasons = {}
     for _, reason in pairs(DROP) do reasons[#reasons + 1] = reason end
     table.sort(reasons)
