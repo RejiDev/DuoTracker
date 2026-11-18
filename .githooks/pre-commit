@@ -1,0 +1,7 @@
+#!/bin/sh
+# Every offline test must pass before a commit.
+if ! python -I tools/test.py > /dev/null 2>&1; then
+    python -I tools/test.py | grep -v "^  ok"
+    echo "Tests failed: commit blocked."
+    exit 1
+fi

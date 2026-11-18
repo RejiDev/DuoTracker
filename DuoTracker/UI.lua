@@ -19,7 +19,7 @@ local RED = { 1.00, 0.54, 0.50 }
 local WHITE = "Interface\\Buttons\\WHITE8X8"
 local TEMPLATE
 
-local TABS = { { "overview", "Overview" }, { "quests", "Quests" }, { "gear", "Gear" },
+local TABS = { { "overview", "Overview" }, { "gear", "Gear" },
     { "profs", "Professions" }, { "gold", "Gold" }, { "notes", "Notes" } }
 local tab = "overview"
 local frame, info, updateButton
@@ -84,13 +84,13 @@ end
 
 local function Adder()
     local e = {}
-    return e, function(text, questId, color, itemId)
+    return e, function(text, color, itemId)
         color = color or BODY
-        e[#e + 1] = { text = text, questId = questId, itemId = itemId, r = color[1], g = color[2], b = color[3] }
+        e[#e + 1] = { text = text, itemId = itemId, r = color[1], g = color[2], b = color[3] }
     end
 end
 
--- A scrolling list of text lines. Right-click a quest line to ignore it; hover an item line for its tooltip.
+-- A scrolling list of text lines. Hover an item line for its tooltip.
 local function ListPanel(parent, width, visible, boxed)
     local p = CreateFrame("Frame", nil, parent, boxed and TEMPLATE or nil)
     p:SetSize(width, visible * LINE_H + 16)
@@ -104,10 +104,6 @@ local function ListPanel(parent, width, visible, boxed)
         line.text:SetPoint("LEFT")
         line.text:SetWidth(width - 28)
         line.text:SetWordWrap(false)
-        line:RegisterForClicks("RightButtonUp")
-        line:SetScript("OnClick", function(self)
-            if self.questId then ns.Ignore(self.questId) end
-        end)
         line:SetScript("OnEnter", ItemTooltip)
         line:SetScript("OnLeave", HideTooltip)
         p.lines[i] = line
@@ -122,10 +118,10 @@ local function ListPanel(parent, width, visible, boxed)
             if entry then
                 line.text:SetText(entry.text)
                 line.text:SetTextColor(entry.r, entry.g, entry.b)
-                line.questId, line.itemId = entry.questId, entry.itemId
+                line.itemId = entry.itemId
                 line:Show()
             else
-                line.questId, line.itemId = nil, nil
+                line.itemId = nil
                 line:Hide()
             end
         end
@@ -212,9 +208,9 @@ local function PairList(page, opts)
         if chosen then
             local e, add = Adder()
             if chosen.themName == "" then
-                add("This pair has no second character yet. Type: /duo pair " .. chosen.youName .. " = Character Name", nil, GOLD)
+                add("This pair has no second character yet. Type: /duo pair " .. chosen.youName .. " = Character Name", GOLD)
             elseif chosen.status == "nodata" then
-                add("Waiting for data. Each character shows up once it has logged in with this addon and you've both been online.", nil, MUTED)
+                add("Waiting for data. Each character shows up once it has logged in with this addon and you've both been online.", MUTED)
             else
                 opts.entries(chosen, add)
             end
@@ -243,23 +239,23 @@ local function OverviewEntries(r, add)
     local partner = ns.PartnerLabel()
     local a, b = r.you, r.them
     add(a.long .. " is level " .. a.level .. " (" .. ns.XPPercent(a) .. "%), " .. b.long .. " is level " ..
-        b.level .. " (" .. ns.XPPercent(b) .. "%).", nil, GOLD)
+        b.level .. " (" .. ns.XPPercent(b) .. "%).", GOLD)
     if r.guideDiff then
-        add("Different RestedXP guides, so step numbers can't be compared.", nil, ORANGE)
-        add("   Yours: " .. GuideLabel(a), nil, MUTED)
-        add("   " .. partner .. "'s: " .. GuideLabel(b), nil, MUTED)
+        add("Different RestedXP guides, so step numbers can't be compared.", ORANGE)
+        add("   Yours: " .. GuideLabel(a), MUTED)
+        add("   " .. partner .. "'s: " .. GuideLabel(b), MUTED)
     elseif r.sameGuide then
         add("Guide: " .. GuideLabel(a) .. ". Step " .. (a.step or "?") .. " and step " .. (b.step or "?") ..
             (a.steps and (" of " .. a.steps) or "") .. ".")
     else
-        add("No RestedXP guide loaded on " .. ns.Mid(a.guide and b or a) .. ", so steps aren't compared.", nil, MUTED)
+        add("No RestedXP guide loaded on " .. ns.Mid(a.guide and b or a) .. ", so steps aren't compared.", MUTED)
     end
     if r.cfgDiff then
-        add("RestedXP settings differ, which can change the route.", nil, ORANGE)
-        add("   Yours: " .. a.cfg, nil, MUTED)
-        add("   " .. partner .. "'s: " .. b.cfg, nil, MUTED)
+        add("RestedXP settings differ, which can change the route.", ORANGE)
+        add("   Yours: " .. a.cfg, MUTED)
+        add("   " .. partner .. "'s: " .. b.cfg, MUTED)
     end
-    add("Last synced " .. ns.Ago(b.synced):lower() .. ".", nil, MUTED)
+    add("Last synced " .. ns.Ago(b.synced):lower() .. ".", MUTED)
 end
 
 local function XPBar(row)
@@ -287,7 +283,7 @@ local function BuildOverview()
     Header(page, "Yours", "RIGHT", "TOPRIGHT", LEFT_EDGE)
     Header(page, "Standing", "CENTER", "TOP", MID)
     page.themHeader = Header(page, "", "LEFT", "TOPLEFT", RIGHT_EDGE)
-    Header(page, "Quests", "RIGHT", "TOPRIGHT", FAR_EDGE)
+    Header(page, "Synced", "RIGHT", "TOPRIGHT", FAR_EDGE)
     local list = PairList(page, {
         detailLines = 8,
         entries = OverviewEntries,
@@ -334,17 +330,7 @@ local function BuildOverview()
                 else
                     step = "No guide"
                 end
-                if not r.questsKnown then
-                    far = "Not synced"
-                elseif #r.youNeed > 0 and #r.themNeed > 0 then
-                    far = "You " .. #r.youNeed .. ", " .. partner .. " " .. #r.themNeed
-                elseif #r.youNeed > 0 then
-                    far = "You need " .. #r.youNeed
-                elseif #r.themNeed > 0 then
-                    far = partner .. " needs " .. #r.themNeed
-                else
-                    far = "None"
-                end
+                far = ns.Ago(r.them.synced) -- when this character's data last arrived
             end
             row.step:SetText(step)
             row.far:SetText(far)
@@ -358,74 +344,6 @@ local function BuildOverview()
         self.themHeader:SetText(ns.PartnerLabel() .. "'s")
         return list:Refresh(TOP + 20) + 10
     end
-end
-
-------------------------------------------------------------------------
--- Quests: two to-do lists
-------------------------------------------------------------------------
-
-local QUEST_LINES = 22
-
-local function BuildQuests()
-    local page = Page("quests")
-    page.leftTitle = FS(page, "GameFontNormal", "LEFT", GOLD)
-    page.leftTitle:SetPoint("TOPLEFT", 22, -(TOP + 4))
-    page.rightTitle = FS(page, "GameFontNormal", "LEFT", GOLD)
-    page.rightTitle:SetPoint("TOPLEFT", 22 + HALF, -(TOP + 4))
-    page.left = ListPanel(page, HALF, QUEST_LINES)
-    page.left:SetPoint("TOPLEFT", 8, -(TOP + 20))
-    page.right = ListPanel(page, HALF, QUEST_LINES)
-    page.right:SetPoint("TOPLEFT", 8 + HALF, -(TOP + 20))
-    local divider = Tex(page, "ARTWORK", 0.54, 0.42, 0.18, 1)
-    divider:SetPoint("TOPLEFT", 8 + HALF, -(TOP + 2))
-    divider:SetSize(1, QUEST_LINES * LINE_H + 34)
-
-    local function column(mine)
-        local e, add = Adder()
-        local clear, waiting = {}, {}
-        for i = 1, #ns.db.pairs do
-            local r = ns.Compare(i)
-            local c, other = r.you, r.them
-            local need, hidden = r.youNeed, r.youHidden
-            if not mine then c, other, need, hidden = r.them, r.you, r.themNeed, r.themHidden end
-            if r.status == "nodata" or not r.questsKnown then
-                local name = mine and r.youLabel or r.themLabel
-                if name ~= "" then waiting[#waiting + 1] = name end
-            elseif #need == 0 then
-                clear[#clear + 1] = c.short
-            else
-                add(Colored(c) .. "  |cfff2a154" .. #need .. " to catch up with " .. ns.Mid(other) .. "|r")
-                for _, id in ipairs(need) do add("     " .. ns.QuestTitle(id), id) end
-                if hidden > 0 then add("     " .. hidden .. (hidden == 1 and " quest hidden: needs another class, race or profession" or " quests hidden: need another class, race or profession"), nil, MUTED) end
-                add("")
-            end
-        end
-        local function names(label, list, color)
-            for i = 1, #list, 3 do
-                add((i == 1 and label or "     ") .. table.concat(list, ", ", i, math.min(i + 2, #list)) ..
-                    (i + 2 < #list and "," or ""), nil, color)
-            end
-        end
-        if #clear > 0 then names("Nothing to do on: ", clear, GOOD) end
-        if #waiting > 0 then names("Not synced yet: ", waiting, MUTED) end
-        if #e == 0 then add("No pairs yet.", nil, MUTED) end
-        if mine and not ns.QuestDataReady() then
-            add("")
-            add("Questie isn't installed here, so class and profession", nil, MUTED)
-            add("quests can't be left out of these lists.", nil, MUTED)
-        end
-        return e
-    end
-    function page:Refresh()
-        self.leftTitle:SetText("For you to do")
-        self.rightTitle:SetText("For " .. ns.PartnerLabel() .. " to do")
-        self.left:Set(column(true))
-        self.right:Set(column(false))
-        return TOP + 20 + QUEST_LINES * LINE_H + 16 + 22
-    end
-    local hint = FS(page, "GameFontDisableSmall", "LEFT", MUTED)
-    hint:SetPoint("TOPLEFT", 22, -(TOP + 20 + QUEST_LINES * LINE_H + 18))
-    hint:SetText("Right-click a quest to ignore it. Scroll a list with the mouse wheel.")
 end
 
 ------------------------------------------------------------------------
@@ -512,10 +430,10 @@ local function BuildGear()
         if not list then
             add("")
         elseif #list == 0 then
-            add(other.long .. " is carrying nothing for " .. ns.Mid(c) .. ".", nil, MUTED)
+            add(other.long .. " is carrying nothing for " .. ns.Mid(c) .. ".", MUTED)
         else
-            add(other.long .. " is carrying (" .. #list .. "):", nil, GOLD)
-            for _, it in ipairs(list) do add("   " .. it.text, nil, BODY, it.id) end
+            add(other.long .. " is carrying (" .. #list .. "):", GOLD)
+            for _, it in ipairs(list) do add("   " .. it.text, BODY, it.id) end
         end
         p.gifts:Set(e)
     end
@@ -575,19 +493,19 @@ local PROF_W = 150
 local function ProfEntries(r, add)
     for _, c in ipairs({ r.you, r.them }) do
         if not c.x then
-            add(c.long .. ": professions haven't synced yet.", nil, MUTED)
+            add(c.long .. ": professions haven't synced yet.", MUTED)
         elseif #c.x.profs == 0 then
-            add(c.long .. ": no professions.", nil, GOLD)
+            add(c.long .. ": no professions.", GOLD)
         else
             local cap = ns.SkillCap(c.level)
-            add(c.long .. " (level " .. (c.level or "?") .. ", can reach " .. cap .. "):", nil, GOLD)
+            add(c.long .. " (level " .. (c.level or "?") .. ", can reach " .. cap .. "):", GOLD)
             for _, p in ipairs(c.x.profs) do
                 local text = "   " .. p[1] .. " " .. p[2] .. " / " .. p[3]
                 if p[2] >= cap and cap > 0 then
-                    add(text .. ". At the limit for this level.", nil, GOOD)
+                    add(text .. ". At the limit for this level.", GOOD)
                 else
                     add(text .. ". " .. (cap - p[2]) .. " behind." ..
-                        (p[3] < cap and " Needs the next rank from a trainer." or ""), nil, BODY)
+                        (p[3] < cap and " Needs the next rank from a trainer." or ""), BODY)
                 end
             end
         end
@@ -595,12 +513,12 @@ local function ProfEntries(r, add)
     local function craft(forChar, fromChar)
         local list = ns.CanCraft(forChar, fromChar)
         if not list or #list == 0 then return end
-        add(fromChar.long .. " can craft for " .. ns.Mid(forChar) .. " (" .. #list .. "):", nil, GOLD)
-        for _, it in ipairs(list) do add("   " .. it.text, nil, BODY, it.id) end
+        add(fromChar.long .. " can craft for " .. ns.Mid(forChar) .. " (" .. #list .. "):", GOLD)
+        for _, it in ipairs(list) do add("   " .. it.text, BODY, it.id) end
     end
     craft(r.you, r.them)
     craft(r.them, r.you)
-    add("Recipes are read when a profession window is opened, so open each one once.", nil, MUTED)
+    add("Recipes are read when a profession window is opened, so open each one once.", MUTED)
 end
 
 local function BuildProfs()
@@ -714,7 +632,7 @@ local FREE_MOUNT = { PALADIN = true, WARLOCK = true }
 local function GoldEntries(r, add)
     for _, c in ipairs({ r.you, r.them }) do
         local line = ns.MountLine(c)
-        if line then add(c.long .. ": " .. line) else add(c.long .. ": gold hasn't synced yet.", nil, MUTED) end
+        if line then add(c.long .. ": " .. line) else add(c.long .. ": gold hasn't synced yet.", MUTED) end
     end
 end
 
@@ -967,7 +885,6 @@ local function Build()
     rule:SetHeight(1)
 
     BuildOverview()
-    BuildQuests()
     BuildGear()
     BuildProfs()
     BuildGold()
@@ -978,8 +895,16 @@ end
 function ns.RefreshUI()
     if not (frame and frame:IsShown()) then return end
     local partner = ns.PartnerLabel()
-    info:SetText((ns.PartnerOnline() and (partner .. " is online. ") or (partner .. " is offline. ")) ..
-        "Last sync: " .. ns.Ago(ns.db.lastSync):lower() .. ".")
+    local st = ns.db.sync
+    local text = (ns.PartnerOnline() and (partner .. " is online") or (partner .. " is offline")) ..
+        ", last heard from " .. (st.lastIn and ns.Ago(st.lastIn.at):lower() or "never") ..
+        (st.partnerVersion and (" (version " .. st.partnerVersion .. ")") or "") .. "."
+    local drop = st.lastDrop and st.drops[st.lastDrop]
+    if drop and time() - drop.at < 3600 then
+        text = text .. "\n|cfff2a154Sync problem " .. ns.Ago(drop.at):lower() .. ": " .. ns.DropText(st.lastDrop) ..
+            ". Type /duo sync for details.|r"
+    end
+    info:SetText(text)
     if ns.updateAvailable then
         updateButton.text:SetText("Update " .. ns.updateAvailable .. ": click to reload")
         updateButton:Show()

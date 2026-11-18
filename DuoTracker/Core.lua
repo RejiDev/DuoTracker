@@ -3,7 +3,9 @@ local ADDON, ns = ...
 
 local PREFIX = "DuoTrk"
 local PROTO = 1
-local CHUNK = 220          -- bytes of payload per addon message
+-- Bytes of payload per message. The client has no call that reports these limits:
+-- party addon messages take 255 bytes, Battle.net game data 4078 (less our header).
+local CHUNK = { BN = 4000, PARTY = 220 }
 local SEND_INTERVAL = 0.25 -- seconds between outgoing messages
 
 -- The built-in pairs. Either side of a pair can be yours; the addon works out
@@ -24,10 +26,9 @@ local me                 -- snapshot of the character that is logged in
 local partner            -- { kind = "BN", id = n } or { kind = "PARTY" }
 local queue, inbox = {}, {}
 local msgSeq = math.random(1, 90000)
-local dirty, questDirty = false, false
+local dirty = false
 local helloAt = 0
 local summaryShown
-local untitled = {} -- completed-quest flags that aren't real quests (no title)
 local lastTry = 0
 local versionWarned
 
@@ -99,9 +100,47 @@ local function nilIfEmpty(s)
     return s
 end
 
+-- Redraws the window and minimap dot. A drawing error is recorded and never
+-- stops the caller, so it can't hold up reading or syncing the character.
 local function Changed()
-    if ns.RefreshUI then ns.RefreshUI() end
-    if ns.UpdateBadge then ns.UpdateBadge() end
+    for _, name in ipairs({ "RefreshUI", "UpdateBadge" }) do
+        local refresh = ns[name] or function() end
+        local ok, err = pcall(refresh)
+        if not ok and db then db.sync.refreshError = { at = time(), err = tostring(err) } end
+    end
+end
+
+------------------------------------------------------------------------
+-- Sync state: what the sync layer last did, kept in the saved variables
+------------------------------------------------------------------------
+
+-- Why a message was thrown away. Saved as keys, so the values never change.
+local DROP = {
+    UNKNOWN_SENDER = "unknown_sender",     -- Battle.net message from someone who isn't the partner
+    PARTY_NOT_PAIRED = "party_not_paired", -- party message from a character not in the pair list
+    PARTY_WHILE_BN = "party_while_bn",     -- party message while already syncing over Battle.net
+    PROTO = "proto",                       -- the other side speaks a different message format
+    NOT_IN_GROUP = "not_in_group",         -- a party message queued after leaving the group
+    EXPIRED = "expired",                   -- a message whose parts didn't all arrive within 2 minutes
+    SEND_ERROR = "send_error",             -- the client refused to send
+}
+ns.DROP = DROP
+
+local DROP_TEXT = {
+    [DROP.UNKNOWN_SENDER] = "a Battle.net message came from someone who isn't your partner",
+    [DROP.PARTY_NOT_PAIRED] = "a party message came from a character not in the pair list",
+    [DROP.PARTY_WHILE_BN] = "a party message was ignored because Battle.net sync was in use",
+    [DROP.PROTO] = "the other addon uses a different message format",
+    [DROP.NOT_IN_GROUP] = "a party message was left unsent after leaving the group",
+    [DROP.EXPIRED] = "a message arrived incomplete",
+    [DROP.SEND_ERROR] = "the game refused to send a message",
+}
+
+local function Drop(reason, detail)
+    local d = db.sync.drops[reason] or { n = 0 }
+    db.sync.drops[reason] = d
+    d.n, d.at, d.detail = d.n + 1, time(), detail and tostring(detail) or nil
+    db.sync.lastDrop = reason
 end
 
 ------------------------------------------------------------------------
@@ -130,9 +169,9 @@ end
 
 local function ReadRXP()
     local R, cd = _G.RXP, _G.RXPCData
-    local group, name, step, steps, guide
+    local group, name, step, steps
     if type(R) == "table" and type(R.currentGuide) == "table" and not R.currentGuide.empty then
-        guide = R.currentGuide
+        local guide = R.currentGuide
         group, name = guide.group, guide.name
         if type(guide.steps) == "table" then steps = #guide.steps end
         if type(R.GetGuideProgress) == "function" then
@@ -164,67 +203,10 @@ local function ReadRXP()
         cfg = table.concat(parts, " / ")
     end
     return type(group) == "string" and group or nil, type(name) == "string" and name or nil,
-        step, steps, nilIfEmpty(cfg), guide
+        step, steps, nilIfEmpty(cfg)
 end
 
--- Remembers which quests each RestedXP guide contains for this character.
--- Guides drop steps that don't apply to your class or race, so a quest that
--- is in your partner's copy of a guide but not in yours is class or race only.
-local function LearnGuideQuests(c, group, name, guide)
-    if not (guide and name and type(guide.steps) == "table") then return false end
-    local label = (group or "") .. " / " .. name
-    c.guides = c.guides or {}
-    c.gq = c.gq or {}
-    local gi
-    for i, n in ipairs(c.guides) do
-        if n == label then gi = i break end
-    end
-    if not gi then
-        gi = #c.guides + 1
-        c.guides[gi] = label
-    end
-    local added = false
-    for _, step in ipairs(guide.steps) do
-        if type(step) == "table" and type(step.elements) == "table" then
-            for _, el in ipairs(step.elements) do
-                local q = type(el) == "table" and el.questId
-                if type(q) == "number" and not c.gq[q] then
-                    c.gq[q] = gi
-                    added = true
-                end
-            end
-        end
-    end
-    return added
-end
-
-local function ScanQuests(c)
-    local ids
-    if C_QuestLog and C_QuestLog.GetAllCompletedQuestIDs then
-        ids = C_QuestLog.GetAllCompletedQuestIDs()
-    end
-    if type(ids) ~= "table" then return false end
-    local old = c.done or {}
-    local done, changed, count = {}, false, 0
-    for _, id in ipairs(ids) do
-        done[id] = true
-        count = count + 1
-        if not old[id] then changed = true end
-    end
-    if not changed then
-        local oldCount = 0
-        for _ in pairs(old) do oldCount = oldCount + 1 end
-        changed = oldCount ~= count
-    end
-    if changed or not c.done then
-        c.done = done
-        return true
-    end
-    return false
-end
-
-local lastGuideLabel
-local function Snapshot(scanQuests)
+local function Snapshot()
     local name = FullName("player")
     if not name then return end
     local key = norm(name)
@@ -243,12 +225,10 @@ local function Snapshot(scanQuests)
     end
     local _, class = UnitClass("player")
     set("class", class)
-    local _, _, raceId = UnitRace("player")
-    set("race", raceId)
     set("level", UnitLevel("player"))
     set("xp", UnitXP("player"))
     set("xpmax", UnitXPMax("player"))
-    local ok, group, guideName, step, steps, cfg, guide = pcall(ReadRXP)
+    local ok, group, guideName, step, steps, cfg = pcall(ReadRXP)
     if ok then
         if c.group ~= group or c.guide ~= guideName or c.cfg ~= cfg then
             c.group, c.guide, c.cfg = group, guideName, cfg
@@ -256,25 +236,7 @@ local function Snapshot(scanQuests)
         end
         if step then set("step", step) end
         if steps then set("steps", steps) end
-        local label = guideName and ((group or "") .. " / " .. guideName)
-        -- RestedXP loads its guide a few seconds after login; only a loaded guide counts as read.
-        if label and guide and label ~= lastGuideLabel then
-            lastGuideLabel = label
-            local okLearn, added = pcall(LearnGuideQuests, c, group, guideName, guide)
-            if okLearn and added then
-                c.qrev = time()
-                questDirty = true
-            end
-        end
     end
-    if scanQuests or not c.done then
-        local okScan, questsChanged = pcall(ScanQuests, c)
-        if okScan and questsChanged then
-            c.qrev = time()
-            questDirty = true
-        end
-    end
-    c.qrev = c.qrev or time()
     if changed or not c.rev then
         c.rev = time()
         c.seen = time()
@@ -286,34 +248,6 @@ end
 ------------------------------------------------------------------------
 -- Comparing a pair
 ------------------------------------------------------------------------
-
-local function HasGuide(c, label)
-    for _, n in ipairs(c.guides or {}) do
-        if n == label then return true end
-    end
-    return false
-end
-
--- Quests `have` has completed that `need` has not.
-local function Needs(need, have)
-    local list, hidden = {}, 0
-    if not (need.done and have.done) then return list, hidden end
-    for id in pairs(have.done) do
-        if not need.done[id] and not db.ignored[id] and not untitled[id] then
-            local gi = have.gq and have.gq[id]
-            local label = gi and have.guides and have.guides[gi]
-            if ns.QuestBlock(id, need) then
-                hidden = hidden + 1 -- needs a class, race or profession they don't have
-            elseif label and HasGuide(need, label) and not (need.gq and need.gq[id]) then
-                hidden = hidden + 1 -- same guide, but RestedXP left it out of theirs
-            else
-                list[#list + 1] = id
-            end
-        end
-    end
-    table.sort(list)
-    return list, hidden
-end
 
 -- Which side of the pair list belongs to this account: 1 or 2. Each known
 -- character votes, so pairs with no data yet still show the right way round.
@@ -398,7 +332,6 @@ function ns.Compare(index)
         themName = b and b.name or nameB,
         youLabel = youLabel, themLabel = themLabel, youLong = youLong, themLong = themLong,
         youClass = ClassOf(a, nameA), themClass = ClassOf(b, nameB),
-        youNeed = {}, themNeed = {}, youHidden = 0, themHidden = 0,
         status = "nodata",
     }
     if not (a and b and a.level and b.level) then return r end
@@ -415,11 +348,6 @@ function ns.Compare(index)
         end
     end
     if a.cfg and b.cfg and a.cfg ~= b.cfg then r.cfgDiff = true end
-    r.youNeed, r.youHidden = Needs(a, b)
-    r.themNeed, r.themHidden = Needs(b, a)
-    r.questsKnown = a.done ~= nil and b.done ~= nil
-    if #r.youNeed > 0 then youBehind = true end
-    if #r.themNeed > 0 then themBehind = true end
     if youBehind and themBehind then
         r.status = "mixed"
     elseif youBehind then
@@ -453,22 +381,6 @@ function ns.XPPercent(c)
         return math.floor(c.xp / c.xpmax * 100 + 0.5)
     end
     return 0
-end
-
-local titleAsked = {}
-function ns.QuestTitle(id)
-    local title = C_QuestLog and C_QuestLog.GetTitleForQuestID and C_QuestLog.GetTitleForQuestID(id)
-    if title and title ~= "" then return title end
-    if not titleAsked[id] and C_QuestLog and C_QuestLog.RequestLoadQuestByID then
-        titleAsked[id] = true
-        C_QuestLog.RequestLoadQuestByID(id)
-    end
-    return "Quest " .. id
-end
-
-function ns.Ignore(id)
-    db.ignored[id] = true
-    Changed()
 end
 
 function ns.PairIndexFor(c)
@@ -505,16 +417,6 @@ local function SummaryLines()
     if r.guideDiff then
         lines[#lines + 1] = "You're on different RestedXP guides, so steps can't be compared."
     end
-    local function questLine(list, who)
-        if #list == 0 then return end
-        local names = {}
-        for n = 1, math.min(#list, 5) do names[n] = "[" .. ns.QuestTitle(list[n]) .. "]" end
-        local more = #list > 5 and (" and " .. (#list - 5) .. " more") or ""
-        lines[#lines + 1] = #list .. (#list == 1 and " quest for " or " quests for ") .. who ..
-            " to catch up: |cfff4dda0" .. table.concat(names, " ") .. "|r" .. more
-    end
-    questLine(r.youNeed, "you")
-    questLine(r.themNeed, ns.PartnerLabel())
     lines[#lines + 1] = "|cffa3abb8Type /duo to see all pairs.|r"
     return lines
 end
@@ -535,8 +437,7 @@ local function PrintSummaryNow(onlyIfNew)
 end
 
 function ns.PrintSummary(onlyIfNew)
-    SummaryLines() -- asks the game for any quest names it hasn't loaded yet
-    C_Timer.After(1.5, function() PrintSummaryNow(onlyIfNew) end)
+    PrintSummaryNow(onlyIfNew)
 end
 
 ------------------------------------------------------------------------
@@ -546,15 +447,16 @@ end
 ns.handlers = {} -- extra message kinds, added by Extras.lua
 
 local function Send(target, text)
-    if not target then return end
     msgSeq = msgSeq + 1
-    local n = math.ceil(#text / CHUNK)
+    local size = CHUNK[target.kind]
+    local n = math.ceil(#text / size)
     for i = 1, n do
         queue[#queue + 1] = { target, "M#" .. msgSeq .. "#" .. i .. "#" .. n .. "#" ..
-            text:sub((i - 1) * CHUNK + 1, i * CHUNK) }
+            text:sub((i - 1) * size + 1, i * size) }
     end
 end
 
+-- Nothing is lost while the partner is offline: every hello resends what they lack.
 function ns.SendToPartner(text)
     if partner then Send(partner, text) end
 end
@@ -564,10 +466,18 @@ local function Pump()
     if not item then return end
     local target, text = item[1], item[2]
     if target.kind == "BN" then
-        if BNSendGameData then pcall(BNSendGameData, target.id, PREFIX, text) end
+        local ok, err = pcall(BNSendGameData, target.id, PREFIX, text)
+        if not ok then Drop(DROP.SEND_ERROR, err) end
     elseif target.kind == "PARTY" then
-        if IsInGroup and IsInGroup() and C_ChatInfo and C_ChatInfo.SendAddonMessage then
-            pcall(C_ChatInfo.SendAddonMessage, PREFIX, text, "PARTY")
+        if not (IsInGroup and IsInGroup()) then
+            Drop(DROP.NOT_IN_GROUP)
+            return
+        end
+        -- Older clients return true/false, newer ones Enum.SendAddonMessageResult.
+        local ok, result = pcall(C_ChatInfo.SendAddonMessage, PREFIX, text, "PARTY")
+        local success = Enum and Enum.SendAddonMessageResult and Enum.SendAddonMessageResult.Success or 0
+        if not ok or result == false or (type(result) == "number" and result ~= success) then
+            Drop(DROP.SEND_ERROR, ok and ("result " .. tostring(result)) or result)
         end
     end
 end
@@ -575,7 +485,7 @@ end
 local function BuildHello(wantReply)
     local parts = {}
     for key, c in pairs(db.chars) do
-        parts[#parts + 1] = esc(key) .. ":" .. (c.rev or 0) .. ":" .. (c.qrev or 0)
+        parts[#parts + 1] = esc(key) .. ":" .. (c.rev or 0) .. ":0" -- third field was quests (before 1.8.0)
     end
     return "H~" .. PROTO .. "~" .. (wantReply and 1 or 0) .. "~" .. table.concat(parts, ",") .. "~" .. esc(MyVersion()) ..
         "~" .. (ns.HelloExtra and ns.HelloExtra() or "")
@@ -584,7 +494,7 @@ end
 local function BuildStatus(key, c)
     return table.concat({ "S", esc(key), esc(c.name), esc(c.class), c.level or 0, c.xp or 0,
         c.xpmax or 0, esc(c.group), esc(c.guide), c.step or 0, c.steps or 0, esc(c.cfg),
-        c.rev or 0, c.race or 0 }, "~")
+        c.rev or 0 }, "~")
 end
 
 local function EncodeIds(ids, gq)
@@ -596,17 +506,6 @@ local function EncodeIds(ids, gq)
         prev = id
     end
     return table.concat(out, ",")
-end
-
-local function BuildQuests(key, c)
-    local done, pending, guides = {}, {}, {}
-    for id in pairs(c.done or {}) do done[#done + 1] = id end
-    for id in pairs(c.gq or {}) do
-        if not (c.done and c.done[id]) then pending[#pending + 1] = id end
-    end
-    for i, n in ipairs(c.guides or {}) do guides[i] = esc(n) end
-    return table.concat({ "Q", esc(key), c.qrev or 0, table.concat(guides, "^"),
-        EncodeIds(done, c.gq), EncodeIds(pending, c.gq) }, "~")
 end
 
 ns.EncodeIds = EncodeIds
@@ -631,7 +530,6 @@ local function SendChanges(known)
         if c.mine then
             local k = known[key]
             if not k or k.rev ~= (c.rev or 0) then Send(partner, BuildStatus(key, c)) end
-            if c.done and (not k or k.qrev ~= (c.qrev or 0)) then Send(partner, BuildQuests(key, c)) end
         end
     end
 end
@@ -653,14 +551,18 @@ local function Handle(text, from)
     local f = split(text, "~")
     local kind = f[1]
     if kind == "H" then
-        if tonumber(f[2]) ~= PROTO then return end
+        if tonumber(f[2]) ~= PROTO then
+            Drop(DROP.PROTO, f[2])
+            return
+        end
         local known = {}
         for entry in (f[4] or ""):gmatch("[^,]+") do
-            local key, rev, qrev = entry:match("^(.-):(%d+):(%d+)$")
-            if key then known[unesc(key)] = { rev = tonumber(rev), qrev = tonumber(qrev) } end
+            local key, rev = entry:match("^(.-):(%d+):%d+$")
+            if key then known[unesc(key)] = { rev = tonumber(rev) } end
         end
         partner = from
         local theirs = f[5] and unesc(f[5])
+        db.sync.partnerVersion = theirs
         if theirs and IsNewer(theirs, MyVersion()) then
             ns.updateAvailable = theirs
             if not versionWarned then
@@ -695,24 +597,6 @@ local function Handle(text, from)
         if c.steps == 0 then c.steps = nil end
         c.cfg = nilIfEmpty(unesc(f[12]))
         c.rev = tonumber(f[13])
-        c.race = tonumber(f[14]) -- absent from versions before 1.7.0
-        if c.race == 0 then c.race = nil end
-        c.synced = time()
-        AfterSync()
-    elseif kind == "Q" and #f >= 6 then
-        local key = unesc(f[2])
-        local c = db.chars[key]
-        if c and c.mine then return end
-        c = c or {}
-        db.chars[key] = c
-        local guides, done, gq = {}, {}, {}
-        if f[4] ~= "" then
-            for i, n in ipairs(split(f[4], "^")) do guides[i] = unesc(n) end
-        end
-        DecodeIds(f[5], done, gq)
-        DecodeIds(f[6], nil, gq)
-        c.guides, c.done, c.gq = guides, done, gq
-        c.qrev = tonumber(f[3])
         c.synced = time()
         AfterSync()
     elseif ns.handlers[kind] then
@@ -737,8 +621,10 @@ local function Receive(text, senderKey, from)
     end
     if box.count >= box.n then
         inbox[slot] = nil
-        local ok, err = pcall(Handle, table.concat(box.parts), from)
-        if not ok and db.debug then Print("Sync error: " .. tostring(err)) end
+        local whole = table.concat(box.parts)
+        db.sync.lastIn = { at = time(), kind = whole:match("^[^~]*") }
+        local ok, err = pcall(Handle, whole, from)
+        if not ok then db.sync.handlerError = { at = time(), err = tostring(err) } end
     end
 end
 
@@ -795,6 +681,21 @@ local function FindBNPartner(onlyID)
     end
 end
 
+-- Who a Battle.net game account belongs to, for the record of rejected messages.
+local function DescribeBN(id)
+    for i = 1, (BNGetNumFriends and BNGetNumFriends() or 0) do
+        local acc = C_BattleNet.GetFriendAccountInfo(i)
+        for j = 1, (acc and C_BattleNet.GetFriendNumGameAccounts(i) or 0) do
+            local g = C_BattleNet.GetFriendGameAccountInfo(i, j)
+            if g and g.gameAccountID == id then
+                return tostring(acc.battleTag) .. " on " .. tostring(g.characterName) ..
+                    " (" .. tostring(g.clientProgram) .. ", project " .. tostring(g.wowProjectID) .. ")"
+            end
+        end
+    end
+    return "game account " .. tostring(id) .. ", not a Battle.net friend"
+end
+
 local function LearnPartner(tag)
     if tag and not db.partnerTag then
         db.partnerTag = tag
@@ -818,17 +719,24 @@ local function TryHello(force)
         if force or not partner or partner.kind ~= "BN" or partner.id ~= id or time() - helloAt > 300 then
             partner = { kind = "BN", id = id }
             helloAt = time()
+            db.sync.lastHelloOut = time()
             Send(partner, BuildHello(true))
         end
+        db.sync.found = { how = "bn", at = time() }
         return true
     end
     if PartyHasPartner() then
         if force or not partner or partner.kind ~= "PARTY" or time() - helloAt > 300 then
             partner = { kind = "PARTY" }
             helloAt = time()
+            db.sync.lastHelloOut = time()
             Send(partner, BuildHello(true))
         end
+        db.sync.found = { how = "party", at = time() }
         return true
+    end
+    if partner or not db.sync.found or db.sync.found.how ~= "none" then
+        db.sync.found = { how = "none", at = time() }
     end
     partner = nil
     return false
@@ -840,7 +748,42 @@ function ns.Sync()
     else
         Print(ns.PartnerLabel() .. " isn't online on WoW Forever, so there's nothing to sync with yet.")
     end
+    for _, line in ipairs(ns.SyncReport()) do Print(line) end
 end
+
+-- The sync state in plain words, one line each, for /duo sync.
+function ns.SyncReport()
+    local st, who = db.sync, ns.PartnerLabel()
+    local lines = {}
+    local found = st.found
+    local how = found and ({ bn = "found over Battle.net", party = "found in your party",
+        none = "not found online" })[found.how] or "not looked for yet"
+    lines[#lines + 1] = "Partner " .. how .. (found and (" (" .. ns.Ago(found.at):lower() .. ")") or "") ..
+        ", BattleTag " .. tostring(db.partnerTag or "not learned yet") .. "."
+    lines[#lines + 1] = "Last hello sent " .. ns.Ago(st.lastHelloOut):lower() .. "; last message from " .. who .. " " ..
+        (st.lastIn and (ns.Ago(st.lastIn.at):lower() .. " (" .. tostring(st.lastIn.kind) .. ")") or "never") .. "."
+    lines[#lines + 1] = who .. "'s version " .. tostring(st.partnerVersion or "unknown") .. ", yours " .. MyVersion() ..
+        ". Waiting to send: " .. #queue .. " part(s)."
+    local reasons = {}
+    for _, reason in pairs(DROP) do reasons[#reasons + 1] = reason end
+    table.sort(reasons)
+    for _, reason in ipairs(reasons) do
+        local d = st.drops[reason]
+        if d then
+            lines[#lines + 1] = "Dropped " .. d.n .. "x, last " .. ns.Ago(d.at):lower() .. ": " .. DROP_TEXT[reason] ..
+                (d.detail and (" [" .. d.detail .. "]") or "") .. "."
+        end
+    end
+    if st.handlerError then
+        lines[#lines + 1] = "Error reading a message " .. ns.Ago(st.handlerError.at):lower() .. ": " .. st.handlerError.err
+    end
+    if st.refreshError then
+        lines[#lines + 1] = "Error drawing the window " .. ns.Ago(st.refreshError.at):lower() .. ": " .. st.refreshError.err
+    end
+    return lines
+end
+
+function ns.DropText(reason) return DROP_TEXT[reason] end
 
 function ns.PartnerOnline()
     return partner ~= nil
@@ -850,8 +793,7 @@ local function Flush()
     if not (partner and me) then return end
     local key = norm(me.name)
     if dirty then Send(partner, BuildStatus(key, me)) end
-    if questDirty and me.done then Send(partner, BuildQuests(key, me)) end
-    dirty, questDirty = false, false
+    dirty = false
     if ns.OnFlush then ns.OnFlush() end
 end
 
@@ -867,8 +809,12 @@ local function InitDB()
         db.schema = 2
     end
     db.chars = db.chars or {}
-    db.ignored = db.ignored or {}
+    -- Quest lists were dropped in 1.8.0; clear what earlier versions saved.
+    db.ignored = nil
+    for _, c in pairs(db.chars) do c.done, c.gq, c.guides, c.qrev, c.race = nil, nil, nil, nil, nil end
     db.minimap = db.minimap or {}
+    db.sync = db.sync or {}
+    db.sync.drops = db.sync.drops or {}
     db.notes = db.notes or {}
     if not db.pairs then
         db.pairs = {}
@@ -938,10 +884,6 @@ local function Slash(msg)
         db.minimap.hide = not db.minimap.hide
         if ns.ShowMinimapButton then ns.ShowMinimapButton(not db.minimap.hide) end
         Print("Minimap button " .. (db.minimap.hide and "hidden." or "shown."))
-    elseif cmd == "unignore" then
-        db.ignored = {}
-        Print("All ignored quests are showing again.")
-        Changed()
     else
         Print("/duo - open the window")
         Print("/duo status - this character's pair, in chat")
@@ -949,7 +891,6 @@ local function Slash(msg)
         Print("/duo pair A = B - set or change a pair, /duo unpair A - remove one")
         Print("/duo name Mark - what to call your partner")
         Print("/duo partner Name#1234 - set your partner's BattleTag by hand, /duo partner reset")
-        Print("/duo unignore - show ignored quests again")
         Print("/duo minimap - show or hide the minimap button")
     end
 end
@@ -966,27 +907,30 @@ events:SetScript("OnEvent", function(_, event, ...)
         SLASH_DUOTRACKER2 = "/duotracker"
         SlashCmdList["DUOTRACKER"] = Slash
         for _, e in ipairs({ "BN_CHAT_MSG_ADDON", "CHAT_MSG_ADDON", "QUEST_TURNED_IN", "PLAYER_LEVEL_UP",
-            "QUEST_DATA_LOAD_RESULT", "BN_FRIEND_INFO_CHANGED", "GROUP_ROSTER_UPDATE" }) do
+            "BN_FRIEND_INFO_CHANGED", "GROUP_ROSTER_UPDATE" }) do
             pcall(events.RegisterEvent, events, e)
         end
-        Snapshot(true)
+        Snapshot()
         if ns.CreateMinimapButton then pcall(ns.CreateMinimapButton) end
         C_Timer.NewTicker(SEND_INTERVAL, Pump)
         local ticks = 0
         C_Timer.NewTicker(5, function()
             ticks = ticks + 1
-            Snapshot(false)
+            Snapshot()
             if ns.OnTick then pcall(ns.OnTick) end
             if ticks % 4 == 0 then Flush() end
             if ticks % 12 == 0 then
                 TryHello(false)
                 for slot, box in pairs(inbox) do
-                    if time() - box.at > 120 then inbox[slot] = nil end
+                    if time() - box.at > 120 then
+                        inbox[slot] = nil
+                        Drop(DROP.EXPIRED, box.count .. " of " .. box.n .. " parts")
+                    end
                 end
             end
         end)
         C_Timer.After(6, function()
-            Snapshot(true) -- RestedXP has loaded its guide by now
+            Snapshot() -- RestedXP has loaded its guide by now
             TryHello(true)
         end)
         C_Timer.After(12, function() ns.PrintSummary(true) end)
@@ -996,25 +940,30 @@ events:SetScript("OnEvent", function(_, event, ...)
         local prefix, text, _, senderID = ...
         if prefix ~= PREFIX or type(text) ~= "string" then return end
         local id, tag = FindBNPartner(senderID)
-        if not id then return end
+        if not id then
+            Drop(DROP.UNKNOWN_SENDER, DescribeBN(senderID))
+            return
+        end
         LearnPartner(tag)
         Receive(text, "bn" .. tostring(senderID), { kind = "BN", id = senderID })
     elseif event == "CHAT_MSG_ADDON" then
         local prefix, text, channel, sender = ...
         if prefix ~= PREFIX or channel ~= "PARTY" or type(text) ~= "string" or type(sender) ~= "string" then return end
         local key = norm(sender:match("^[^-]+"))
-        if not PairNames()[key] then return end
-        if partner and partner.kind == "BN" then return end -- already syncing over Battle.net
+        if not PairNames()[key] then
+            Drop(DROP.PARTY_NOT_PAIRED, sender)
+            return
+        end
+        if partner and partner.kind == "BN" then
+            Drop(DROP.PARTY_WHILE_BN, sender)
+            return
+        end
         Receive(text, "p" .. key, { kind = "PARTY" })
     elseif event == "QUEST_TURNED_IN" or event == "PLAYER_LEVEL_UP" then
         C_Timer.After(2, function()
-            Snapshot(true)
+            Snapshot()
             Flush()
         end)
-    elseif event == "QUEST_DATA_LOAD_RESULT" then
-        local id, ok = ...
-        if id and ok == false then untitled[id] = true end
-        Changed()
     elseif event == "BN_FRIEND_INFO_CHANGED" or event == "GROUP_ROSTER_UPDATE" then
         if not partner and time() - lastTry >= 5 then
             lastTry = time()

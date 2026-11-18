@@ -228,7 +228,7 @@ local function Collect()
     local me = ns.Me()
     if not me then return end
     pendingItems = false
-    local x = { gold = ns.plain(GetMoney and GetMoney()) or 0, eq = {}, bag = {}, bagStats = {}, profs = {}, skills = {},
+    local x = { gold = ns.plain(GetMoney and GetMoney()) or 0, eq = {}, bag = {}, bagStats = {}, profs = {},
         craft = (me.x and me.x.craft) or {} }
     for _, slot in ipairs(SLOTS) do
         local id = GetInventoryItemID and GetInventoryItemID("player", slot)
@@ -259,20 +259,12 @@ local function Collect()
         for i = 1, 6 do
             local index = list[i]
             if index then
-                local name, _, rank, maxRank, _, _, skillLine = GetProfessionInfo(index)
-                if type(skillLine) == "number" then x.skills[skillLine] = true end
+                local name, _, rank, maxRank = GetProfessionInfo(index)
                 if name then
                     x.profs[#x.profs + 1] = { name, rank or 0, maxRank or 0 }
                     if i <= 2 then x.np = (x.np or 0) + 1 end -- the first two are the main professions
                 end
             end
-        end
-    end
-    -- Skill ids, so profession quests are only compared when both characters have the profession.
-    if C_SkillInfo and C_SkillInfo.GetNumSkillLines and C_SkillInfo.GetSkillLineInfo then
-        for i = 1, C_SkillInfo.GetNumSkillLines() do
-            local line = C_SkillInfo.GetSkillLineInfo(i)
-            if line and not line.isHeader and type(line.skillID) == "number" then x.skills[line.skillID] = true end
         end
     end
     local sig = ns.BuildExtras("", x, 0)
@@ -342,8 +334,7 @@ function ns.BuildExtras(key, x, rev)
     table.sort(bagIds)
     for _, id in ipairs(bagIds) do bagStats[#bagStats + 1] = id .. ":" .. table.concat(x.bagStats[id], ".") end
     return table.concat({ "X", ns.esc(key), rev, x.gold or 0, table.concat(eq, ","),
-        ns.EncodeIds(keys(x.bag)), table.concat(profs, ","), ns.EncodeIds(keys(x.craft)), x.np or 0, table.concat(eqStats, ","), table.concat(bagStats, ","),
-        ns.EncodeIds(keys(x.skills or {})) }, "~")
+        ns.EncodeIds(keys(x.bag)), table.concat(profs, ","), ns.EncodeIds(keys(x.craft)), x.np or 0, table.concat(eqStats, ","), table.concat(bagStats, ",") }, "~")
 end
 
 ns.handlers.X = function(f)
@@ -375,10 +366,6 @@ ns.handlers.X = function(f)
     end
     x.bagStats = {}
     for id, text in (f[11] or ""):gmatch("(%d+):([%d%.]+)") do x.bagStats[tonumber(id)] = stats(text) end
-    if f[12] then -- absent from versions before 1.7.0
-        x.skills = {}
-        ns.DecodeIds(f[12], x.skills, {})
-    end
     c.x, c.xrev = x, tonumber(f[3])
     c.synced = time()
 end

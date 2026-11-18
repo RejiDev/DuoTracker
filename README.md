@@ -1,6 +1,6 @@
 # Duo Tracker
 
-A World of Warcraft: Forever addon for two people levelling characters in pairs. It shows which character in each pair has fallen behind on level, RestedXP guide step and quests, and syncs both accounts over Battle.net whenever you are both online.
+A World of Warcraft: Forever addon for two people levelling characters in pairs. It shows which character in each pair has fallen behind on level and RestedXP guide step, and syncs both accounts over Battle.net whenever you are both online.
 
 ## Install or update
 
@@ -16,3 +16,11 @@ To switch automatic updates off, download and run **Remove Duo Tracker auto-upda
 
 - `/duo` opens the window with every pair.
 - `/duo help` lists the other commands.
+
+## If sync looks wrong
+
+Type `/duo sync`. It lists whether your partner was found, when the last message from them arrived, which version they run, and anything that was thrown away and why. The top of the `/duo` window shows the same in short.
+
+## For developers
+
+`python tools/test.py` runs the offline tests: two copies of the addon syncing with each other on a fake game, including against the older 1.6.1 and 1.7.0 code. Install the one dependency with `pip install -r tools/requirements.txt`, and switch on the commit check once with `git config core.hooksPath .githooks`.
