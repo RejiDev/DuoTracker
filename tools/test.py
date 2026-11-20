@@ -19,7 +19,7 @@ from lupa import lua51
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADDON = os.path.join(ROOT, "DuoTracker")
 # Versions players may still be running, by the commit that released them.
-OLD_VERSIONS = {"1.6.1": "48961e0", "1.7.0": "0e9e8a9"}
+OLD_VERSIONS = {"1.6.1": "48961e0", "1.7.0": "0e9e8a9", "1.8.0": "3097c76"}
 
 FAKE_WOW = r"""
 local clock = 1800000000
@@ -153,10 +153,13 @@ function QuestLogPushQuest()
     if link.party then link.pushes[#link.pushes + 1] = quests.selected end
 end
 function InCombatLockdown() return quests.combat end
-function UnitIsPlayer(unit) return unit == "questnpc" and quests.giver ~= nil or unit:match("^party") ~= nil end
-function UnitInParty(unit) return link.party end
 function GetQuestID() return quests.offered end
 function QuestGetAutoAccept() return false end
+function ConfirmAcceptQuest() pickUp(quests.confirm) end
+function confirm(id, name)
+    quests.confirm = id
+    fire("QUEST_ACCEPT_CONFIRM", name, "Quest " .. id, id)
+end
 function pickUp(id)
     quests.log[#quests.log + 1] = id
     fire("QUEST_ACCEPTED", id)
@@ -391,7 +394,7 @@ def quest_sharing():
           "got %r" % lst(mark.g.quests.accepted))
     check("Reji's record says it was shared", reji.db().share.last.cause == "shared", str(reji.db().share.last.cause))
     check("Mark's record says it came from Reji and wasn't shared back",
-          mark.db().share.counts["accepted"] == 1 and mark.db().share.counts["from_partner"] == 1
+          mark.db().share.last.cause == "accepted" and mark.db().share.counts["shared"] is None
           and lst(reji.g.quests.accepted) == [])
     check("/duo sync shows it", "Quest sharing on" in " / ".join(reji.ns.SyncReport().values()))
 
@@ -412,6 +415,13 @@ def quest_sharing():
 
     mark.lua.eval("offer")(104, "Random", "Stranger")
     check("a quest shared by someone not paired isn't accepted", 104 not in lst(mark.g.quests.accepted))
+
+    mark.lua.eval("confirm")(106, "Reji Planty")
+    run(reji, mark, 2)
+    check("an escort quest Reji starts is confirmed for Mark, not shared back",
+          106 in lst(mark.g.quests.log) and mark.db().share.last.cause == "accepted")
+    mark.lua.eval("confirm")(107, "Random Stranger")
+    check("an escort quest a stranger starts isn't confirmed", 107 not in lst(mark.g.quests.log))
 
     mark.ns.ToggleShare()
     reji.lua.eval("pickUp")(105)

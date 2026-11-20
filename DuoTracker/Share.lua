@@ -9,23 +9,21 @@ local SHARE = {
     NO_PARTNER = "no_partner",   -- the partner's character isn't in your party
     NOT_SHAREABLE = "not_shareable", -- the game says this quest can't be shared
     COMBAT = "combat",           -- held until combat ends (the game blocks sharing in combat)
-    FROM_PARTNER = "from_partner", -- not shared back: it came from the partner
     OFF = "off",                 -- switched off with /duo share
 }
 ns.SHARE = SHARE
 
 local SHARE_TEXT = {
     [SHARE.SHARED] = "shared with your party",
-    [SHARE.ACCEPTED] = "accepted from your partner",
+    [SHARE.ACCEPTED] = "accepted from your partner (not shared back)",
     [SHARE.NO_PARTNER] = "not shared: your partner's character isn't in your party",
     [SHARE.NOT_SHAREABLE] = "not shared: the game says it can't be shared",
     [SHARE.COMBAT] = "waiting for combat to end before sharing",
-    [SHARE.FROM_PARTNER] = "not shared back: it came from your partner",
     [SHARE.OFF] = "not shared: quest sharing is off",
 }
 
 local held = {}       -- quest ids to share once combat ends
-local fromPartner = {} -- quest ids the partner shared with us, so they aren't shared back
+local fromPartner = {} -- quest ids the partner offered us, so they aren't shared back once accepted
 
 local function Title(id)
     local get = C_QuestLog and C_QuestLog.GetTitleForQuestID
@@ -59,11 +57,11 @@ end
 
 local function Push(id)
     local st = ns.db.share
-    if not st.on then return Record(SHARE.OFF, id) end
     if fromPartner[id] then
         fromPartner[id] = nil
-        return Record(SHARE.FROM_PARTNER, id)
+        return Record(SHARE.ACCEPTED, id)
     end
+    if not st.on then return Record(SHARE.OFF, id) end
     if not ns.PartyHasPartner() then return Record(SHARE.NO_PARTNER, id) end
     if InCombatLockdown and InCombatLockdown() then
         held[id] = true
@@ -83,11 +81,7 @@ local function Push(id)
     Record(pushable and SHARE.SHARED or SHARE.NOT_SHAREABLE, id)
 end
 
--- Whether a unit, or a name the game gave, is one of the partner's paired characters in your party.
-local function IsPartnerUnit(unit)
-    return UnitIsPlayer(unit) and UnitInParty(unit) and ns.PairNames()[ns.norm(ns.FullName(unit))] or false
-end
-
+-- Whether a name the game gave is one of the partner's paired characters in your party.
 local function IsPartnerName(name)
     if type(name) ~= "string" then return false end
     local names = ns.PairNames()
@@ -101,11 +95,6 @@ local function IsPartnerName(name)
         end
     end
     return false
-end
-
-local function Accepted(id)
-    fromPartner[id] = true
-    Record(SHARE.ACCEPTED, id)
 end
 
 function ns.ToggleShare()
@@ -148,10 +137,11 @@ events:SetScript("OnEvent", function(_, event, ...)
     elseif not ns.db.share.on then
         return
     elseif event == "QUEST_DETAIL" then
-        if not IsPartnerUnit("questnpc") then return end
+        -- A shared quest shows the sharer as the quest giver.
+        if not IsPartnerName(ns.FullName("questnpc")) then return end
         local id = GetQuestID and GetQuestID()
         if not id or id == 0 then return end
-        Accepted(id)
+        fromPartner[id] = true -- recorded as accepted when the game adds it to the log
         if QuestGetAutoAccept and QuestGetAutoAccept() then
             CloseQuest() -- the game has accepted it already
         else
@@ -161,7 +151,7 @@ events:SetScript("OnEvent", function(_, event, ...)
         -- An escort or event quest a party member started.
         local name, _, id = ...
         if not IsPartnerName(name) then return end
-        if type(id) == "number" then Accepted(id) end
+        if type(id) == "number" then fromPartner[id] = true end
         ConfirmAcceptQuest()
         if StaticPopup_Hide then StaticPopup_Hide("QUEST_ACCEPT") end
     end
