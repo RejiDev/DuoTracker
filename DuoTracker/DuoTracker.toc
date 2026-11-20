@@ -1,12 +1,13 @@
 ## Interface: 16001
 ## Title: Duo Tracker
 ## Notes: Shows which character in each levelling pair has fallen behind on level and RestedXP guide step.
-## Version: 1.8.0
+## Version: 1.9.0
 ## IconTexture: Interface\AddOns\DuoTracker\icon
 ## SavedVariables: DuoTrackerDB
 ## OptionalDeps: RXPGuides
 
 Core.lua
 Extras.lua
+Share.lua
 UI.lua
 Minimap.lua

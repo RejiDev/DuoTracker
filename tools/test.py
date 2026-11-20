@@ -118,6 +118,7 @@ function GetMoney() return player.gold end
 function UnitName(unit)
     if unit == "player" then return player.first, player.last end
     if unit == "party1" and link.party then return link.partyFirst, link.partyLast end
+    if unit == "questnpc" and quests.giver then return quests.giver[1], quests.giver[2] end
 end
 function UnitClass(unit) return player.class, player.class end
 function UnitRace(unit) return "Orc", "Orc", 2 end
@@ -139,10 +140,39 @@ C_QuestLog = {
     RequestLoadQuestByID = function() end,
 }
 C_Container = { GetContainerNumSlots = function() return 0 end }
+
+-- The quest log, and sharing over the party link.
+quests = { log = {}, selected = 0, unshareable = {}, combat = false, offered = 0, giver = nil, accepted = {} }
+C_QuestLog.GetLogIndexForQuestID = function(id)
+    for i, q in ipairs(quests.log) do if q == id then return i end end
+end
+C_QuestLog.GetSelectedQuest = function() return quests.selected end
+C_QuestLog.SetSelectedQuest = function(id) quests.selected = id end
+C_QuestLog.IsPushableQuest = function(id) return not quests.unshareable[id] end
+function QuestLogPushQuest()
+    if link.party then link.pushes[#link.pushes + 1] = quests.selected end
+end
+function InCombatLockdown() return quests.combat end
+function UnitIsPlayer(unit) return unit == "questnpc" and quests.giver ~= nil or unit:match("^party") ~= nil end
+function UnitInParty(unit) return link.party end
+function GetQuestID() return quests.offered end
+function QuestGetAutoAccept() return false end
+function pickUp(id)
+    quests.log[#quests.log + 1] = id
+    fire("QUEST_ACCEPTED", id)
+end
+function AcceptQuest()
+    quests.accepted[#quests.accepted + 1] = quests.offered
+    pickUp(quests.offered)
+end
+function offer(id, first, last)
+    quests.offered, quests.giver = id, { first, last }
+    fire("QUEST_DETAIL")
+end
 C_Item = { GetItemInfo = function() return nil end }
 
 -- The Battle.net link: what the other player looks like from here, and the wire.
-link = { online = false, party = false, outbox = {}, partyOut = {} }
+link = { online = false, party = false, outbox = {}, partyOut = {}, pushes = {} }
 function BNGetNumFriends() return 1 end
 C_BattleNet = {
     GetFriendAccountInfo = function(i) return { battleTag = link.tag } end,
@@ -246,6 +276,12 @@ def run(a, b, seconds, step=0.25):
                 me.lua.execute("link.%s = {}" % box)
                 for m in msgs:
                     deliver(m)
+            pushes = me.g.link.pushes
+            ids = [pushes[i] for i in range(1, len(pushes) + 1)]
+            me.lua.execute("link.pushes = {}")
+            first, last = me.sender.split(" ", 1)
+            for qid in ids:
+                other.lua.eval("offer")(qid, first, last)
         t += step
 
 
@@ -341,6 +377,62 @@ def wrong_partner():
     check("/duo sync explains it", "isn't your partner" in report and "Mark#2222" in report, report)
 
 
+def lst(t):
+    return [t[i] for i in range(1, len(t) + 1)] if t else []
+
+
+def quest_sharing():
+    """In a party, a quest one picks up is shared and the other accepts it; nothing is shared back."""
+    print("Quest sharing in a party")
+    reji, mark = start("current", "current", transport="party")
+    reji.lua.eval("pickUp")(101)
+    run(reji, mark, 2)
+    check("Mark accepted the quest Reji picked up", lst(mark.g.quests.accepted) == [101],
+          "got %r" % lst(mark.g.quests.accepted))
+    check("Reji's record says it was shared", reji.db().share.last.cause == "shared", str(reji.db().share.last.cause))
+    check("Mark's record says it came from Reji and wasn't shared back",
+          mark.db().share.counts["accepted"] == 1 and mark.db().share.counts["from_partner"] == 1
+          and lst(reji.g.quests.accepted) == [])
+    check("/duo sync shows it", "Quest sharing on" in " / ".join(reji.ns.SyncReport().values()))
+
+    reji.g.quests.combat = True
+    reji.lua.eval("pickUp")(102)
+    run(reji, mark, 2)
+    check("in combat the quest waits", 102 not in lst(mark.g.quests.accepted) and reji.db().share.last.cause == "combat")
+    reji.g.quests.combat = False
+    reji.lua.eval("fire")("PLAYER_REGEN_ENABLED")
+    run(reji, mark, 2)
+    check("it is shared once combat ends", 102 in lst(mark.g.quests.accepted), "got %r" % lst(mark.g.quests.accepted))
+
+    reji.lua.execute("quests.unshareable[103] = true")
+    reji.lua.eval("pickUp")(103)
+    run(reji, mark, 2)
+    check("a quest the game can't share is recorded, not sent",
+          reji.db().share.last.cause == "not_shareable" and 103 not in lst(mark.g.quests.accepted))
+
+    mark.lua.eval("offer")(104, "Random", "Stranger")
+    check("a quest shared by someone not paired isn't accepted", 104 not in lst(mark.g.quests.accepted))
+
+    mark.ns.ToggleShare()
+    reji.lua.eval("pickUp")(105)
+    run(reji, mark, 2)
+    check("with sharing off on Mark's side, Mark doesn't accept", 105 not in lst(mark.g.quests.accepted))
+    mark.ns.ToggleShare()
+    for p in (reji, mark):
+        errs = p.errors()
+        check("%s's addon raised no Lua errors" % p.name, not errs, "; ".join(errs[:3]))
+
+
+def quest_sharing_bn_only():
+    """Synced over Battle.net but not grouped: nothing to share with."""
+    print("Quest sharing while not in a party")
+    reji, mark = start("current", "current")
+    reji.lua.eval("pickUp")(201)
+    run(reji, mark, 2)
+    check("not shared when the partner isn't in the party", reji.db().share.last.cause == "no_partner"
+          and lst(mark.g.quests.accepted) == [])
+
+
 def main():
     sync_pair("current", "current")
     for old in OLD_VERSIONS:
@@ -349,6 +441,8 @@ def main():
     sync_pair("current", "current", transport="party")
     sync_pair("current", "current", break_mark_refresh=True)
     wrong_partner()
+    quest_sharing()
+    quest_sharing_bn_only()
     print()
     if FAILURES:
         print("%d check(s) failed." % len(FAILURES))

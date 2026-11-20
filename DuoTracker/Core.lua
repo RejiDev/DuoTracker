@@ -715,6 +715,8 @@ local function PartyHasPartner()
     return false
 end
 
+ns.PairNames, ns.FullName, ns.PartyHasPartner = PairNames, FullName, PartyHasPartner
+
 local function TryHello(force)
     local id, tag = FindBNPartner()
     if id then
@@ -777,6 +779,7 @@ function ns.SyncReport()
                 (d.detail and (" [" .. d.detail .. "]") or "") .. "."
         end
     end
+    if ns.ShareReport then lines[#lines + 1] = ns.ShareReport() end
     if st.handlerError then
         lines[#lines + 1] = "Error reading a message " .. ns.Ago(st.handlerError.at):lower() .. ": " .. st.handlerError.err
     end
@@ -819,6 +822,8 @@ local function InitDB()
     db.sync = db.sync or {}
     db.sync.drops = db.sync.drops or {}
     db.notes = db.notes or {}
+    db.share = db.share or { on = true }
+    db.share.counts = db.share.counts or {}
     if not db.pairs then
         db.pairs = {}
         for i, p in ipairs(ns.DEFAULT_PAIRS) do db.pairs[i] = { p[1], p[2] } end
@@ -883,6 +888,8 @@ local function Slash(msg)
         db.partnerName = rest
         Print("Your partner now shows as " .. rest .. ".")
         Changed()
+    elseif cmd == "share" then
+        ns.ToggleShare()
     elseif cmd == "minimap" then
         db.minimap.hide = not db.minimap.hide
         if ns.ShowMinimapButton then ns.ShowMinimapButton(not db.minimap.hide) end
@@ -894,6 +901,7 @@ local function Slash(msg)
         Print("/duo pair A = B - set or change a pair, /duo unpair A - remove one")
         Print("/duo name Mark - what to call your partner")
         Print("/duo partner Name#1234 - set your partner's BattleTag by hand, /duo partner reset")
+        Print("/duo share - turn quest sharing with your partner on or off")
         Print("/duo minimap - show or hide the minimap button")
     end
 end

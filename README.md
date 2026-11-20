@@ -15,6 +15,7 @@ To switch automatic updates off, download and run **Remove Duo Tracker auto-upda
 ## In game
 
 - `/duo` opens the window with every pair.
+- When your partner's paired character is in your party, a quest you pick up is shared with them, and a quest they share with you is accepted for you. `/duo share` turns this off or back on. `/duo sync` shows the last quest shared or accepted.
 - `/duo help` lists the other commands.
 
 ## If sync looks wrong
