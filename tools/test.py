@@ -19,7 +19,7 @@ from lupa import lua51
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADDON = os.path.join(ROOT, "DuoTracker")
 # Versions players may still be running, by the commit that released them.
-OLD_VERSIONS = {"1.6.1": "48961e0", "1.7.0": "0e9e8a9", "1.8.0": "3097c76"}
+OLD_VERSIONS = {"1.6.1": "48961e0", "1.7.0": "0e9e8a9", "1.8.0": "3097c76", "1.9.0": "5e6d839"}
 
 FAKE_WOW = r"""
 local clock = 1800000000
@@ -28,7 +28,9 @@ local frames = {}
 errors = {}
 printed = {}
 
-function time() return math.floor(clock) end
+skew = 0 -- this PC's clock against the server's
+function time() return math.floor(clock + skew) end
+function GetServerTime() return math.floor(clock) end
 function GetTime() return clock end
 
 local function run(f, ...)
@@ -185,6 +187,12 @@ C_BattleNet = {
             characterName = link.character }
     end,
 }
+function UnitGUID(unit)
+    if unit == "party1" and link.party then return "Player-party1" end
+end
+C_BattleNet.GetAccountInfoByGUID = function(guid)
+    if guid == "Player-party1" and link.partyTag then return { battleTag = link.partyTag } end
+end
 function BNSendGameData(id, prefix, text)
     if id == link.id and link.online then link.outbox[#link.outbox + 1] = { prefix, text } end
 end
@@ -214,6 +222,7 @@ class Player:
             if line.endswith(".lua"):
                 load(files[line], line)("DuoTracker", self.ns)
         self.name = name
+        self.sent = []  # every raw message this side put on the wire
 
     def files(self):
         if self.version == "current":
@@ -262,6 +271,7 @@ def connect(a, b, a_char, b_char, transport="bn"):
         else:
             link.party = True
             link.partyFirst, link.partyLast = other_char.split(" ", 1)
+            link.partyTag = other.tag
         me.sender = a_char if me is a else b_char
 
 
@@ -277,6 +287,7 @@ def run(a, b, seconds, step=0.25):
                 out = me.g.link[box]
                 msgs = [out[i] for i in range(1, len(out) + 1)]
                 me.lua.execute("link.%s = {}" % box)
+                me.sent.extend(m[2] for m in msgs)
                 for m in msgs:
                     deliver(m)
             pushes = me.g.link.pushes
@@ -297,16 +308,24 @@ def check(label, ok, detail=""):
         FAILURES.append(label)
 
 
-def start(version_a, version_b, transport="bn", reji_db=None):
+def start(version_a, version_b, transport="bn", reji_db=None, reji_lua=None, mark_lua=None,
+          reji_char=("Reji Planty", "WARRIOR", 20, 9352, 23200),
+          mark_char=("Marjorie Dawes", "ROGUE", 18, 13961, 19400), mark_skew=0):
+    """reji_lua / mark_lua: Lua run before login, to set up saved variables."""
     reji = Player("Reji", version_a, "Reji#1111", 101)
     mark = Player("Mark", version_b, "Mark#2222", 202)
     if reji_db:
         reji.g.DuoTrackerDB = reji.lua.table_from(reji_db)
-    reji.play("Reji Planty", "WARRIOR", 20, 9352, 23200)
-    mark.play("Marjorie Dawes", "ROGUE", 18, 13961, 19400)
+    if reji_lua:
+        reji.lua.execute(reji_lua)
+    if mark_lua:
+        mark.lua.execute(mark_lua)
+    mark.g.skew = mark_skew
+    reji.play(*reji_char)
+    mark.play(*mark_char)
     reji.login()
     mark.login()
-    connect(reji, mark, "Reji Planty", "Marjorie Dawes", transport)
+    connect(reji, mark, reji_char[0], mark_char[0], transport)
     run(reji, mark, 30)
     return reji, mark
 
@@ -359,6 +378,11 @@ def sync_pair(version_a, version_b, transport="bn", break_mark_refresh=False):
             p.ns.ToggleUI()
             for tab in ("overview", "gear", "profs", "gold", "notes"):
                 p.ns.ShowTab(tab)
+            p.ns.ShowTab("overview")
+            opened = p.lua.eval("function(ns) return pcall(function() ns.OpenPicker(nil, 1, 1, true); "
+                                "ns.OpenPicker(nil, 1, 2, false); ns.RefreshUI() end) end")(p.ns)
+            opened = opened if isinstance(opened, tuple) else (opened,)
+            check("%s's character picker opens for both sides" % p.name, opened[0] is True, str(opened))
             err = p.db().sync.refreshError
             if not break_mark_refresh or p is reji:
                 check("%s's window draws every tab" % p.name, err is None, str(err and err.err))
@@ -443,6 +467,108 @@ def quest_sharing_bn_only():
           and lst(mark.g.quests.accepted) == [])
 
 
+def pairs_of(p):
+    return p.ns.EncodePairs(p.db().pairs)
+
+
+def pair_editing():
+    """A pair changed on one side shows on the other; the later edit wins even when PC clocks differ."""
+    print("Editing pairs, with Mark's PC clock an hour behind")
+    reji, mark = start("current", "current", mark_skew=-3600)
+    i = reji.ns.FindPair("Marks Uncle")
+    reji.ns.AssignSlot(i, 2, "Burt Bacharach")
+    run(reji, mark, 30)
+    check("Mark sees the pair Reji changed", pairs_of(mark) == pairs_of(reji), pairs_of(mark))
+    check("the character moved out of its old pair, leaving that side empty",
+          mark.db().pairs[1][2] == "" and mark.db().pairs[i][2] == "Burt Bacharach",
+          "%r / %r" % (mark.db().pairs[1][2], mark.db().pairs[i][2]))
+    run(reji, mark, 5)
+    mark.ns.RemovePair(1)
+    run(reji, mark, 30)
+    check("Mark's later edit wins on Reji's side despite his slow clock",
+          pairs_of(reji) == pairs_of(mark) and len(lst(reji.db().pairs)) == 7, pairs_of(reji))
+    reji.lua.execute("DuoTrackerDB.pairs[1][1] = 'Tie A'; DuoTrackerDB.pairsRev = 1900000000")
+    mark.lua.execute("DuoTrackerDB.pairs[1][1] = 'Tie B'; DuoTrackerDB.pairsRev = 1900000000")
+    reji.ns.Sync()
+    run(reji, mark, 30)
+    check("two edits in the same second end up the same on both sides", pairs_of(reji) == pairs_of(mark),
+          "%s vs %s" % (pairs_of(reji), pairs_of(mark)))
+    report = " / ".join(reji.ns.SyncReport().values())
+    check("/duo sync shows pairs and sharing", "pairs, last changed" in report and "Sharing" in report, report)
+    for p in (reji, mark):
+        errs = p.errors()
+        check("%s's addon raised no Lua errors" % p.name, not errs, "; ".join(errs[:3]))
+
+
+PRIVATE_SETUP = """DuoTrackerDB = { schema = 2, chars = {
+    rejiplanty = { mine = true, name = "Reji Planty", class = "WARRIOR", level = 20, xp = 9352, xpmax = 23200, rev = 5 },
+    bankymcbank = { mine = true, name = "Banky Mcbank", class = "MAGE", level = 5, xp = 0, xpmax = 400, rev = 6 },
+} }"""
+MARK_KNEW_BANK = """DuoTrackerDB = { schema = 3, partnerTag = "Reji#1111", chars = {
+    bankymcbank = { name = "Banky Mcbank", class = "MAGE", level = 5, rev = 6 },
+} }"""
+
+
+def leaks(p, words, since=0):
+    """Raw messages after `since` naming any of `words`, other than requests to forget."""
+    out = []
+    for text in p.sent[since:]:
+        low = text.lower().replace(" ", "")
+        if any(w in low for w in words) and not re.match(r"M#\d+#1#1#F~", text):
+            out.append(text[:60])
+    return out
+
+
+def private_characters():
+    """Bank and solo characters stay on Reji's PC; ticking and unticking takes effect right away."""
+    print("Private characters")
+    reji, mark = start("current", "current", reji_lua=PRIVATE_SETUP, mark_lua=MARK_KNEW_BANK,
+                       reji_char=("Solo Dolo", "PRIEST", 12, 100, 9000))
+    check("Mark still gets Reji's paired character", xp_of(mark, "rejiplanty") == (20, 9352),
+          "got %r" % (xp_of(mark, "rejiplanty"),))
+    check("Mark never gets the solo character Reji is playing", mark.char("solodolo") is None)
+    check("Mark's addon forgot the bank character it had from before", mark.char("bankymcbank") is None)
+    check("no message from Reji names a private character", not leaks(reji, ("banky", "solodolo")),
+          "%r" % leaks(reji, ("banky", "solodolo"))[:2])
+    reji.ns.Sync()
+    run(reji, mark, 30)
+    check("Reji stops asking once Mark has forgotten", reji.db().forget["bankymcbank"] is None)
+    report = " / ".join(reji.ns.SyncReport().values())
+    check("/duo sync lists what's private", "Sharing 1 of your 3" in report and "Banky Mcbank" in report, report)
+
+    reji.ns.SetShared("solodolo", True)
+    run(reji, mark, 30)
+    check("ticking the solo character sends it within 30 s", xp_of(mark, "solodolo") == (12, 100),
+          "got %r" % (xp_of(mark, "solodolo"),))
+    reji.ns.SetShared("solodolo", False)
+    run(reji, mark, 10)
+    check("unticking it removes it from Mark's addon", mark.char("solodolo") is None)
+
+    since = len(reji.sent)
+    reji.ns.SetShared("rejiplanty", False)
+    run(reji, mark, 10)
+    i = mark.ns.FindPair("Marjorie Dawes")
+    check("unticking a paired character removes it from Mark's addon and from the pair",
+          mark.char("rejiplanty") is None and mark.db().pairs[i][1] == "",
+          "pair %r" % ((mark.db().pairs[i][1], mark.db().pairs[i][2]),))
+    check("its name stops going out", not leaks(reji, ("rejiplanty",), since), "%r" % leaks(reji, ("rejiplanty",), since)[:2])
+    for p in (reji, mark):
+        errs = p.errors()
+        check("%s's addon raised no Lua errors" % p.name, not errs, "; ".join(errs[:3]))
+
+
+def party_on_unpaired_alt():
+    """Mark joins Reji's party on an alt that isn't in any pair: his BattleTag identifies him."""
+    print("Partner in the party on an unpaired, private alt")
+    reji, mark = start("current", "current", transport="party", reji_db={"schema": 2, "partnerTag": "Mark#2222"},
+                       mark_char=("Mark Alt", "MAGE", 9, 50, 5000))
+    st = reji.db().sync
+    check("Reji's addon takes Mark's party messages", st.lastIn is not None and st.drops["party_not_paired"] is None,
+          "drops %r" % (st.drops["party_not_paired"],))
+    check("Mark gets Reji's character", xp_of(mark, "rejiplanty") == (20, 9352), "got %r" % (xp_of(mark, "rejiplanty"),))
+    check("Reji doesn't get Mark's private alt", reji.char("markalt") is None)
+
+
 def main():
     sync_pair("current", "current")
     for old in OLD_VERSIONS:
@@ -453,6 +579,9 @@ def main():
     wrong_partner()
     quest_sharing()
     quest_sharing_bn_only()
+    pair_editing()
+    private_characters()
+    party_on_unpaired_alt()
     print()
     if FAILURES:
         print("%d check(s) failed." % len(FAILURES))

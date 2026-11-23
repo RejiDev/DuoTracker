@@ -156,65 +156,37 @@ local function Header(page, text, justify, anchor, x)
     return fs
 end
 
--- A list of every pair, one row each. Clicking a row opens a detail list under it.
+-- A list of every pair, one row each.
 local function PairList(page, opts)
-    local L = { rows = {}, selected = false }
-    L.detail = ListPanel(page, INNER, opts.detailLines or 8, true)
-    L.detail:Hide()
+    local L = { rows = {} }
     function L:Refresh(top)
         local n = #ns.db.pairs
         local partner = ns.PartnerLabel()
-        if self.selected and self.selected > n then self.selected = false end
-        local y, chosen = top, nil
-        self.detail:Hide()
+        local y = top
         for i = 1, math.max(n, #self.rows) do
             local row = self.rows[i]
             if not row then
-                row = CreateFrame("Button", nil, page)
+                row = CreateFrame("Frame", nil, page)
                 row:SetSize(INNER, ROW_H)
                 row.bg = Tex(row, "BACKGROUND", 0, 0, 0, 0)
                 row.bg:SetAllPoints()
                 opts.make(row)
-                row:SetScript("OnClick", function()
-                    if self.selected == i then self.selected = false else self.selected = i end
-                    self.detail.offset = 0
-                    ns.RefreshUI()
-                end)
                 self.rows[i] = row
             end
             if i > n then
                 row:Hide()
             else
-                local r = ns.Compare(i)
                 row:Show()
                 row:ClearAllPoints()
                 row:SetPoint("TOPLEFT", page, "TOPLEFT", 8, -y)
                 y = y + ROW_H
-                if i == self.selected then
-                    chosen = r
-                    row.bg:SetColorTexture(0.91, 0.78, 0.47, 0.14)
-                    self.detail:ClearAllPoints()
-                    self.detail:SetPoint("TOPLEFT", page, "TOPLEFT", 8, -y)
-                    self.detail:Show()
-                    y = y + self.detail:GetHeight()
-                elseif i % 2 == 1 then
+                if i % 2 == 1 then
                     row.bg:SetColorTexture(0.165, 0.13, 0.098, 1)
                 else
                     row.bg:SetColorTexture(0, 0, 0, 0)
                 end
-                opts.fill(row, r, i, partner)
+                opts.fill(row, ns.Compare(i), i, partner)
             end
-        end
-        if chosen then
-            local e, add = Adder()
-            if chosen.themName == "" then
-                add("This pair has no second character yet. Type: /duo pair " .. chosen.youName .. " = Character Name", GOLD)
-            elseif chosen.status == "nodata" then
-                add("Waiting for data. Each character shows up once it has logged in with this addon and you've both been online.", MUTED)
-            else
-                opts.entries(chosen, add)
-            end
-            self.detail:Set(e)
         end
         return y
     end
@@ -222,41 +194,166 @@ local function PairList(page, opts)
 end
 
 local function LevelText(c, name)
-    if name == "" then return "/duo pair to set" end
+    if name == "" then return "Click to choose" end
     return c and c.level and ("Level " .. c.level) or "Not seen yet"
+end
+
+------------------------------------------------------------------------
+-- Choosing a character for one side of a pair
+------------------------------------------------------------------------
+
+local PICK_W, PICK_ROW, PICK_ROWS = 330, 20, 16
+local picker
+
+local function PickerEntries(index, column, mine)
+    local e = {}
+    local partner = ns.PartnerLabel()
+    for _, cand in ipairs(ns.Candidates(mine)) do
+        local c = cand.c
+        local note
+        if cand.pair == index then
+            note = "here now"
+        elseif cand.pair then
+            local r = ns.Compare(cand.pair)
+            local other = mine and r.themName or r.youName
+            note = "with " .. (other ~= "" and ((mine and r.themLabel or r.youLabel)) or "nobody")
+        else
+            note = "not paired"
+        end
+        e[#e + 1] = {
+            text = Colored(c, c.name) .. "  |cffb5a68cLevel " .. (c.level or "?") .. "|r",
+            note = note,
+            checked = mine and not ns.Private(c),
+            toggle = mine and function(on) ns.SetShared(cand.key, on) end or nil,
+            pick = function() ns.AssignSlot(index, column, c.name) end,
+        }
+    end
+    if #e == 0 then
+        e[1] = { text = mine and "No characters seen yet. Log in on each one once." or
+            ("No characters from " .. partner .. " yet. They show up after a sync."), muted = true }
+    end
+    e[#e + 1] = { text = "Leave this side empty", muted = true, pick = function() ns.AssignSlot(index, column, "") end }
+    e[#e + 1] = { text = "Remove this pair", red = true, pick = function() ns.RemovePair(index) end }
+    return e
+end
+
+local function RenderPicker()
+    local p = picker
+    local e = PickerEntries(p.index, p.column, p.mine)
+    p.offset = math.max(0, math.min(p.offset, #e - PICK_ROWS))
+    local shown = math.min(#e, PICK_ROWS)
+    for i = 1, PICK_ROWS do
+        local row, entry = p.rows[i], e[p.offset + i]
+        if entry and i <= shown then
+            row:Show()
+            row.name:SetText(entry.text)
+            local color = entry.red and RED or entry.muted and MUTED or BODY
+            row.name:SetTextColor(color[1], color[2], color[3])
+            row.note:SetText(entry.note or "")
+            row.pick, row.toggle = entry.pick, entry.toggle
+            if entry.toggle then
+                row.check:Show()
+                row.check:SetChecked(entry.checked)
+            else
+                row.check:Hide()
+            end
+        else
+            row:Hide()
+        end
+    end
+    p.more:SetText(#e > PICK_ROWS and "Scroll for more" or "")
+    p:SetHeight(48 + shown * PICK_ROW + (#e > PICK_ROWS and 14 or 0))
+end
+
+local function BuildPicker()
+    picker = CreateFrame("Frame", "DuoTrackerPicker", frame, TEMPLATE)
+    picker:SetWidth(PICK_W)
+    picker:SetFrameStrata("DIALOG")
+    picker:SetClampedToScreen(true)
+    picker:EnableMouse(true)
+    Backdrop(picker, 0.09, 0.07, 0.05, 0.98)
+    picker.offset = 0
+    picker.title = FS(picker, "GameFontNormal", "LEFT", GOLD)
+    picker.title:SetPoint("TOPLEFT", 10, -9)
+    picker.help = FS(picker, "GameFontDisableSmall", "LEFT", MUTED)
+    picker.help:SetPoint("TOPLEFT", 10, -26)
+    picker.rows = {}
+    for i = 1, PICK_ROWS do
+        local row = CreateFrame("Button", nil, picker)
+        row:SetSize(PICK_W - 16, PICK_ROW)
+        row:SetPoint("TOPLEFT", 8, -(42 + (i - 1) * PICK_ROW))
+        local hl = Tex(row, "HIGHLIGHT", 1, 1, 1, 0.08)
+        hl:SetAllPoints()
+        row.check = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+        row.check:SetSize(20, 20)
+        row.check:SetPoint("LEFT")
+        row.check:SetScript("OnClick", function(self)
+            if row.toggle then row.toggle(self:GetChecked() and true or false) end
+        end)
+        row.name = FS(row, "GameFontHighlightSmall", "LEFT")
+        row.name:SetPoint("LEFT", 24, 0)
+        row.note = FS(row, "GameFontDisableSmall", "RIGHT", MUTED)
+        row.note:SetPoint("RIGHT", -4, 0)
+        row:SetScript("OnClick", function()
+            if row.pick then
+                local pick = row.pick
+                picker:Hide()
+                pick()
+            end
+        end)
+        picker.rows[i] = row
+    end
+    picker.more = FS(picker, "GameFontDisableSmall", "RIGHT", MUTED)
+    picker.more:SetPoint("BOTTOMRIGHT", -8, 4)
+    picker:EnableMouseWheel(true)
+    picker:SetScript("OnMouseWheel", function(self, delta)
+        self.offset = math.max(0, self.offset - delta * 2)
+        RenderPicker()
+    end)
+    if UISpecialFrames then table.insert(UISpecialFrames, "DuoTrackerPicker") end
+    picker:Hide()
+end
+
+-- Opens the character list for one side of pair `index`; `column` is that side's slot in the pair.
+function ns.OpenPicker(anchor, index, column, mine)
+    if not picker then BuildPicker() end
+    if picker:IsShown() and picker.index == index and picker.mine == mine then
+        picker:Hide()
+        return
+    end
+    picker.index, picker.column, picker.mine, picker.offset = index, column, mine, 0
+    picker.title:SetText(mine and "Your character for this pair" or (ns.PartnerLabel() .. "'s character for this pair"))
+    picker.help:SetText(mine and ("Tick to share with " .. ns.PartnerLabel() .. ". Unticked ones stay on this PC.")
+        or "Click one to put it in this pair.")
+    picker:ClearAllPoints()
+    if anchor then picker:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2) else picker:SetPoint("CENTER") end
+    picker:Show()
+    RenderPicker()
+end
+
+-- An invisible button over a name in a row; click opens the picker for that side.
+local function PickButton(row, theirs)
+    local b = CreateFrame("Button", nil, row)
+    b:SetSize(theirs and 250 or 230, 24)
+    local hl = Tex(b, "HIGHLIGHT", 1, 1, 1, 0.06)
+    hl:SetAllPoints()
+    b:SetScript("OnClick", function(self)
+        if self.index then ns.OpenPicker(self, self.index, self.column, not theirs) end
+    end)
+    b:SetScript("OnEnter", function(self)
+        if not GameTooltip then return end
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine(theirs and "Click to choose which of your partner's characters goes here." or
+            "Click to choose which of your characters goes here, and which ones you share.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", HideTooltip)
+    return b
 end
 
 ------------------------------------------------------------------------
 -- Overview: head to head
 ------------------------------------------------------------------------
-
-local function GuideLabel(c)
-    if not c.guide then return "none loaded" end
-    return (c.group and (c.group .. " / ") or "") .. c.guide
-end
-
-local function OverviewEntries(r, add)
-    local partner = ns.PartnerLabel()
-    local a, b = r.you, r.them
-    add(a.long .. " is level " .. a.level .. " (" .. ns.XPPercent(a) .. "%), " .. b.long .. " is level " ..
-        b.level .. " (" .. ns.XPPercent(b) .. "%).", GOLD)
-    if r.guideDiff then
-        add("Different RestedXP guides, so step numbers can't be compared.", ORANGE)
-        add("   Yours: " .. GuideLabel(a), MUTED)
-        add("   " .. partner .. "'s: " .. GuideLabel(b), MUTED)
-    elseif r.sameGuide then
-        add("Guide: " .. GuideLabel(a) .. ". Step " .. (a.step or "?") .. " and step " .. (b.step or "?") ..
-            (a.steps and (" of " .. a.steps) or "") .. ".")
-    else
-        add("No RestedXP guide loaded on " .. ns.Mid(a.guide and b or a) .. ", so steps aren't compared.", MUTED)
-    end
-    if r.cfgDiff then
-        add("RestedXP settings differ, which can change the route.", ORANGE)
-        add("   Yours: " .. a.cfg, MUTED)
-        add("   " .. partner .. "'s: " .. b.cfg, MUTED)
-    end
-    add("Last synced " .. ns.Ago(b.synced):lower() .. ".", MUTED)
-end
 
 local function XPBar(row)
     local track = Tex(row, "ARTWORK", 0.23, 0.18, 0.14, 1)
@@ -285,8 +382,6 @@ local function BuildOverview()
     page.themHeader = Header(page, "", "LEFT", "TOPLEFT", RIGHT_EDGE)
     Header(page, "Synced", "RIGHT", "TOPRIGHT", FAR_EDGE)
     local list = PairList(page, {
-        detailLines = 8,
-        entries = OverviewEntries,
         make = function(row)
             row.youName = FS(row, "GameFontNormal", "RIGHT")
             row.youName:SetPoint("TOPRIGHT", row, "TOPLEFT", LEFT_EDGE, -7)
@@ -311,9 +406,15 @@ local function BuildOverview()
             row.themFill:SetPoint("LEFT", row.themTrack, "LEFT")
             row.far = FS(row, "GameFontHighlightSmall", "RIGHT", BODY)
             row.far:SetPoint("RIGHT", row, "LEFT", FAR_EDGE, 0)
+            row.youPick = PickButton(row, false)
+            row.youPick:SetPoint("TOPRIGHT", row, "TOPLEFT", LEFT_EDGE + 6, -2)
+            row.themPick = PickButton(row, true)
+            row.themPick:SetPoint("TOPLEFT", row, "TOPLEFT", RIGHT_EDGE - 6, -2)
         end,
-        fill = function(row, r, _, partner)
-            row.youName:SetText(r.youLabel)
+        fill = function(row, r, i, partner)
+            row.youPick.index, row.youPick.column = i, r.youColumn
+            row.themPick.index, row.themPick.column = i, r.themColumn
+            row.youName:SetText(r.youName ~= "" and r.youLabel or "Not set")
             row.youName:SetTextColor(ClassColor(r.you, r.youClass))
             row.youLevel:SetText(LevelText(r.you, r.youName))
             SetXPBar(row.youFill, r.you)
@@ -340,9 +441,23 @@ local function BuildOverview()
             if r.status == "you" then row.pill:Show() else row.pill:Hide() end
         end,
     })
+    local add = CreateFrame("Button", nil, page, TEMPLATE)
+    add:SetSize(130, 22)
+    Backdrop(add, 0.165, 0.13, 0.098, 1)
+    add.text = FS(add, "GameFontHighlightSmall", "CENTER", GOLD)
+    add.text:SetPoint("CENTER")
+    add.text:SetText("+ Add a pair")
+    add:SetScript("OnClick", function() ns.AddPair() end)
+    local hint = FS(page, "GameFontDisableSmall", "LEFT", MUTED)
+    hint:SetText("Click a character to change who's in the pair.")
     function page:Refresh()
         self.themHeader:SetText(ns.PartnerLabel() .. "'s")
-        return list:Refresh(TOP + 20) + 10
+        local y = list:Refresh(TOP + 20) + 8
+        add:ClearAllPoints()
+        add:SetPoint("TOPLEFT", page, "TOPLEFT", 16, -y)
+        hint:ClearAllPoints()
+        hint:SetPoint("LEFT", add, "RIGHT", 12, 0)
+        return y + 32
     end
 end
 
@@ -490,37 +605,6 @@ end
 
 local PROF_W = 150
 
-local function ProfEntries(r, add)
-    for _, c in ipairs({ r.you, r.them }) do
-        if not c.x then
-            add(c.long .. ": professions haven't synced yet.", MUTED)
-        elseif #c.x.profs == 0 then
-            add(c.long .. ": no professions.", GOLD)
-        else
-            local cap = ns.SkillCap(c.level)
-            add(c.long .. " (level " .. (c.level or "?") .. ", can reach " .. cap .. "):", GOLD)
-            for _, p in ipairs(c.x.profs) do
-                local text = "   " .. p[1] .. " " .. p[2] .. " / " .. p[3]
-                if p[2] >= cap and cap > 0 then
-                    add(text .. ". At the limit for this level.", GOOD)
-                else
-                    add(text .. ". " .. (cap - p[2]) .. " behind." ..
-                        (p[3] < cap and " Needs the next rank from a trainer." or ""), BODY)
-                end
-            end
-        end
-    end
-    local function craft(forChar, fromChar)
-        local list = ns.CanCraft(forChar, fromChar)
-        if not list or #list == 0 then return end
-        add(fromChar.long .. " can craft for " .. ns.Mid(forChar) .. " (" .. #list .. "):", GOLD)
-        for _, it in ipairs(list) do add("   " .. it.text, BODY, it.id) end
-    end
-    craft(r.you, r.them)
-    craft(r.them, r.you)
-    add("Recipes are read when a profession window is opened, so open each one once.", MUTED)
-end
-
 local function BuildProfs()
     local page = Page("profs")
     Header(page, "Yours", "RIGHT", "TOPRIGHT", 420)
@@ -591,8 +675,6 @@ local function BuildProfs()
         end
     end
     local list = PairList(page, {
-        detailLines = 9,
-        entries = ProfEntries,
         make = function(row)
             row.youName = FS(row, "GameFontNormal", "RIGHT")
             row.youName:SetPoint("RIGHT", row, "LEFT", 420, 0)
@@ -610,7 +692,7 @@ local function BuildProfs()
         end,
     })
     local legend = FS(page, "GameFontDisableSmall", "LEFT", MUTED)
-    legend:SetText("Bars run 0 to 300. The pale marker is the highest skill the character's level allows; a green bar has reached it. Click a pair for cooking, first aid, fishing and what each can craft for the other.")
+    legend:SetText("Bars run 0 to 300. The pale marker is the highest skill the character's level allows; a green bar has reached it.")
     legend:SetWidth(INNER - 28)
     function page:Refresh()
         self.themHeader:SetText(ns.PartnerLabel() .. "'s")
@@ -626,15 +708,6 @@ end
 ------------------------------------------------------------------------
 
 local GOLD_W = 170
-local MOUNT_COPPER = 100 * 10000
-local FREE_MOUNT = { PALADIN = true, WARLOCK = true }
-
-local function GoldEntries(r, add)
-    for _, c in ipairs({ r.you, r.them }) do
-        local line = ns.MountLine(c)
-        if line then add(c.long .. ": " .. line) else add(c.long .. ": gold hasn't synced yet.", MUTED) end
-    end
-end
 
 local function BuildGold()
     local page = Page("gold")
@@ -681,24 +754,22 @@ local function BuildGold()
         end
         local gold = c.x.gold or 0
         s.amount:SetText(ns.Money(gold))
-        if FREE_MOUNT[c.class or ""] then
+        if ns.FREE_MOUNT[c.class or ""] then
             s.free:SetText("Free class mount")
             s.free:SetTextColor(GOOD[1], GOOD[2], GOOD[3])
         else
             s.track:Show()
-            local width = GOLD_W * math.min(gold, MOUNT_COPPER) / MOUNT_COPPER
+            local width = GOLD_W * math.min(gold, ns.MOUNT_COPPER) / ns.MOUNT_COPPER
             if width >= 1 then
                 s.fill:Show()
                 s.fill:SetWidth(width)
-                local color = gold >= MOUNT_COPPER and GOOD or GOLD
+                local color = gold >= ns.MOUNT_COPPER and GOOD or GOLD
                 s.fill:SetColorTexture(color[1], color[2], color[3], 1)
             end
         end
         return gold
     end
     local list = PairList(page, {
-        detailLines = 2,
-        entries = GoldEntries,
         make = function(row)
             row.you, row.them = side(row, true), side(row, false)
             row.total = FS(row, "GameFontHighlightSmall", "RIGHT", GOLD)
@@ -800,7 +871,8 @@ local function BuildNotes()
                     card.text:SetText(note.text)
                     card.text:SetTextColor(BODY[1], BODY[2], BODY[3])
                     local writer = ns.db.chars[ns.norm(note.by)]
-                    card.by:SetText((writer and writer.long or note.by or "?") .. ", " .. ns.Ago(note.t):lower())
+                    local who = (writer and writer.long) or (note.by ~= "" and note.by) or "Written"
+                    card.by:SetText(who .. ", " .. ns.Ago(note.t):lower())
                 else
                     card.text:SetText("No note. Click to write one.")
                     card.text:SetTextColor(MUTED[1], MUTED[2], MUTED[3])
@@ -891,6 +963,9 @@ end
 
 function ns.RefreshUI()
     if not (frame and frame:IsShown()) then return end
+    if picker and picker:IsShown() then
+        if picker.index > #ns.db.pairs then picker:Hide() else RenderPicker() end
+    end
     local partner = ns.PartnerLabel()
     local st = ns.db.sync
     local text = (ns.PartnerOnline() and (partner .. " is online") or (partner .. " is offline")) ..

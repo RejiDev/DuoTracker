@@ -32,8 +32,8 @@ local WEAPONS = {
     PRIEST = set(4, 10, 15, 19), SHAMAN = set(0, 1, 4, 5, 10, 13, 15), MAGE = set(7, 10, 15, 19),
     WARLOCK = set(7, 10, 15, 19), DRUID = set(4, 5, 10, 13, 15),
 }
-local MOUNT_LEVEL, MOUNT_COPPER = 40, 100 * 10000
-local FREE_MOUNT = { PALADIN = true, WARLOCK = true }
+ns.MOUNT_COPPER = 100 * 10000 -- the level 40 mount; read by the Gold tab
+ns.FREE_MOUNT = { PALADIN = true, WARLOCK = true }
 
 local dirty, sendDue, lastSig = true, false, nil
 local pendingItems = false
@@ -393,10 +393,10 @@ end
 
 function ns.SetNote(index, text)
     local key = ns.PairKey(index)
-    local me = ns.Me()
-    if not (key and me) then return end
+    if not key then return end
     text = tostring(text or ""):gsub("[%c]", " "):sub(1, 200)
-    local note = { t = time(), by = me.name, text = text }
+    -- Signed with your character in this pair, never the one you're on, which may be private.
+    local note = { t = time(), by = ns.Compare(index).youName, text = text }
     ns.db.notes[key] = note
     ns.SendToPartner(NoteMessage(key, note))
     ns.Changed()
@@ -405,23 +405,28 @@ end
 function ns.HelloExtra()
     local parts = {}
     for key, c in pairs(ns.db.chars) do
-        if c.xrev then parts[#parts + 1] = ns.esc(key) .. ":" .. c.xrev end
+        if c.xrev and not ns.Private(c) then parts[#parts + 1] = ns.esc(key) .. ":" .. c.xrev end
     end
     return table.concat(parts, ",")
 end
 
-function ns.OnHello(extra)
+ns.helloHooks[#ns.helloHooks + 1] = function(_, extra)
     local known = {}
     for entry in extra:gmatch("[^,]+") do
         local key, rev = entry:match("^(.-):(%d+)$")
         if key then known[ns.unesc(key)] = tonumber(rev) end
     end
     for key, c in pairs(ns.db.chars) do
-        if c.mine and c.x and known[key] ~= c.xrev then
+        if c.mine and not ns.Private(c) and c.x and known[key] ~= c.xrev then
             ns.SendToPartner(ns.BuildExtras(key, c.x, c.xrev))
         end
     end
-    for key, note in pairs(ns.db.notes) do ns.SendToPartner(NoteMessage(key, note)) end
+    -- Only notes of current pairs: an old pair's key may hold a now-private name.
+    local current = {}
+    for i = 1, #ns.db.pairs do current[ns.PairKey(i)] = true end
+    for key, note in pairs(ns.db.notes) do
+        if current[key] then ns.SendToPartner(NoteMessage(key, note)) end
+    end
     sendDue = false
 end
 
@@ -432,7 +437,7 @@ end
 local lastSend = 0
 function ns.OnFlush()
     local me = ns.Me()
-    if sendDue and me and me.x and time() - lastSend >= 60 then
+    if sendDue and me and me.x and not ns.Private(me) and time() - lastSend >= 60 then
         lastSend = time()
         sendDue = false
         ns.SendToPartner(ns.BuildExtras(ns.norm(me.name), me.x, me.xrev))
@@ -519,11 +524,6 @@ function ns.HandMeDowns(forChar, fromChar)
     return Wearables(forChar, fromChar, x and x.bag or {}, x and x.bagStats)
 end
 
--- Things fromChar knows how to make that would be an upgrade for forChar.
-function ns.CanCraft(forChar, fromChar)
-    return Wearables(forChar, fromChar, fromChar and fromChar.x and fromChar.x.craft or {}, nil)
-end
-
 function ns.SkillCap(level)
     level = level or 1
     if level >= 35 then return 300 end
@@ -540,15 +540,3 @@ function ns.Money(copper)
     return s .. "s " .. (copper % 100) .. "c"
 end
 
-function ns.MountLine(c)
-    if not (c and c.x) then return nil end
-    local gold = c.x.gold or 0
-    if FREE_MOUNT[c.class or ""] then
-        return ns.Money(gold) .. ". Gets a free mount from a class quest at level " .. MOUNT_LEVEL .. "."
-    end
-    if gold >= MOUNT_COPPER then
-        return ns.Money(gold) .. ". Enough for the level " .. MOUNT_LEVEL .. " mount (100g)."
-    end
-    return ns.Money(gold) .. ". " .. math.floor(gold / MOUNT_COPPER * 100) .. "% of the 100g mount at level " ..
-        MOUNT_LEVEL .. ", " .. ns.Money(MOUNT_COPPER - gold) .. " to go."
-end

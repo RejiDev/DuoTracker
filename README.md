@@ -14,7 +14,8 @@ To switch automatic updates off, download and run **Remove Duo Tracker auto-upda
 
 ## In game
 
-- `/duo` opens the window with every pair.
+- `/duo` opens the window with every pair. Click a character's name to choose who goes in that pair, add a pair with **+ Add a pair**, or remove one from the same list. Pair changes show up for your partner too.
+- In the list of your own characters, tick the ones to share. Unticked characters (bank alts, solo characters) never leave your PC, and your partner's addon forgets them. `/duo sync` lists which ones are private.
 - When your partner's paired character is in your party, a quest you pick up is shared with them, and a quest they share with you is accepted for you. `/duo share` turns this off or back on. `/duo sync` shows the last quest shared or accepted.
 - `/duo help` lists the other commands.
 

@@ -83,18 +83,7 @@ end
 
 -- Whether a name the game gave is one of the partner's paired characters in your party.
 local function IsPartnerName(name)
-    if type(name) ~= "string" then return false end
-    local names = ns.PairNames()
-    if not names[ns.norm(name)] then return false end
-    for i = 1, 4 do
-        local unit = "party" .. i
-        local full = ns.FullName(unit)
-        if full and (ns.norm(full) == ns.norm(name) or ns.norm(UnitName(unit)) == ns.norm(name))
-            and names[ns.norm(full)] then
-            return true
-        end
-    end
-    return false
+    return type(name) == "string" and ns.PartnerInParty(name)
 end
 
 function ns.ToggleShare()

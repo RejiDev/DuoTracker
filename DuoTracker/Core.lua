@@ -216,6 +216,7 @@ local function Snapshot()
     me = c
     c.mine = true
     c.name = name
+    ns.DefaultShared(c)
     local changed = false
     local function set(field, value)
         value = plain(value)
@@ -333,6 +334,7 @@ function ns.Compare(index)
         themName = b and b.name or nameB,
         youLabel = youLabel, themLabel = themLabel, youLong = youLong, themLong = themLong,
         youClass = ClassOf(a, nameA), themClass = ClassOf(b, nameB),
+        youColumn = columnA, themColumn = columnB,
         status = "nodata",
     }
     if not (a and b and a.level and b.level) then return r end
@@ -382,14 +384,6 @@ function ns.XPPercent(c)
         return math.floor(c.xp / c.xpmax * 100 + 0.5)
     end
     return 0
-end
-
-function ns.PairIndexFor(c)
-    if not c then return nil end
-    local key = norm(c.name)
-    for i, p in ipairs(db.pairs) do
-        if norm(p[1]) == key or norm(p[2]) == key then return i end
-    end
 end
 
 local function SummaryLines()
@@ -445,7 +439,8 @@ end
 -- Messages
 ------------------------------------------------------------------------
 
-ns.handlers = {} -- extra message kinds, added by Extras.lua
+ns.handlers = {}   -- extra message kinds, added by Extras.lua and Pairs.lua
+ns.helloHooks = {} -- run on each hello from the partner with (their known keys, extra field)
 
 local function Send(target, text)
     msgSeq = msgSeq + 1
@@ -487,7 +482,9 @@ end
 local function BuildHello(wantReply)
     local parts = {}
     for key, c in pairs(db.chars) do
-        parts[#parts + 1] = esc(key) .. ":" .. (c.rev or 0) .. ":0" -- third field was quests (before 1.8.0)
+        if not ns.Private(c) then
+            parts[#parts + 1] = esc(key) .. ":" .. (c.rev or 0) .. ":0" -- third field was quests (before 1.8.0)
+        end
     end
     return "H~" .. PROTO .. "~" .. (wantReply and 1 or 0) .. "~" .. table.concat(parts, ",") .. "~" .. esc(MyVersion()) ..
         "~" .. (ns.HelloExtra and ns.HelloExtra() or "")
@@ -527,9 +524,9 @@ end
 ns.DecodeIds = DecodeIds
 
 local function SendChanges(known)
-    -- Sends each of this account's characters the partner doesn't have the latest of.
+    -- Sends each of this account's shared characters the partner doesn't have the latest of.
     for key, c in pairs(db.chars) do
-        if c.mine then
+        if c.mine and not ns.Private(c) then
             local k = known[key]
             if not k or k.rev ~= (c.rev or 0) then Send(partner, BuildStatus(key, c)) end
         end
@@ -583,7 +580,7 @@ local function Handle(text, from)
         end
         if f[3] == "1" then Send(partner, BuildHello(false)) end
         SendChanges(known)
-        if ns.OnHello then ns.OnHello(f[6] or "") end
+        for _, hook in ipairs(ns.helloHooks) do hook(known, f[6] or "") end
         AfterSync()
     elseif kind == "S" and #f >= 13 then
         local key = unesc(f[2])
@@ -634,30 +631,6 @@ end
 -- Finding the partner
 ------------------------------------------------------------------------
 
-local function FirstWord(name)
-    return norm(tostring(name or ""):match("^%s*(%S+)"))
-end
-
--- Names of the partner's paired characters. Battle.net may report only the
--- first name, so first names are included unless one of yours shares it.
-local function PairNames()
-    local names, myFirst = {}, {}
-    for _, c in pairs(db.chars) do
-        if c.mine then myFirst[FirstWord(c.name)] = true end
-    end
-    for _, p in ipairs(db.pairs) do
-        for n = 1, 2 do
-            local key = norm(p[n])
-            if key ~= "" and not (db.chars[key] and db.chars[key].mine) then
-                names[key] = true
-                local first = FirstWord(p[n])
-                if first ~= "" and not myFirst[first] then names[first] = true end
-            end
-        end
-    end
-    return names
-end
-
 -- Returns the game account of the partner if they are online in this game.
 -- With `onlyID`, checks whether that specific game account is the partner.
 local function FindBNPartner(onlyID)
@@ -665,7 +638,7 @@ local function FindBNPartner(onlyID)
             and C_BattleNet.GetFriendNumGameAccounts and C_BattleNet.GetFriendGameAccountInfo) then
         return nil
     end
-    local names = PairNames()
+    local names = ns.PairNames()
     for i = 1, BNGetNumFriends() do
         local acc = C_BattleNet.GetFriendAccountInfo(i)
         if acc then
@@ -706,16 +679,10 @@ local function LearnPartner(tag)
 end
 
 local function PartyHasPartner()
-    if not (IsInGroup and IsInGroup()) then return false end
-    local names = PairNames()
-    for i = 1, 4 do
-        local name = FullName("party" .. i)
-        if name and names[norm(name)] then return true end
-    end
-    return false
+    return ns.PartnerInParty(nil)
 end
 
-ns.PairNames, ns.FullName, ns.PartyHasPartner = PairNames, FullName, PartyHasPartner
+ns.FullName, ns.PartyHasPartner = FullName, PartyHasPartner
 
 local function TryHello(force)
     local id, tag = FindBNPartner()
@@ -745,6 +712,8 @@ local function TryHello(force)
     partner = nil
     return false
 end
+
+ns.TryHello = TryHello
 
 function ns.Sync()
     if TryHello(true) then
@@ -779,6 +748,7 @@ function ns.SyncReport()
                 (d.detail and (" [" .. d.detail .. "]") or "") .. "."
         end
     end
+    for _, line in ipairs(ns.PairsReport()) do lines[#lines + 1] = line end
     if ns.ShareReport then lines[#lines + 1] = ns.ShareReport() end
     if st.handlerError then
         lines[#lines + 1] = "Error reading a message " .. ns.Ago(st.handlerError.at):lower() .. ": " .. st.handlerError.err
@@ -798,7 +768,7 @@ end
 local function Flush()
     if not (partner and me) then return end
     local key = norm(me.name)
-    if dirty then Send(partner, BuildStatus(key, me)) end
+    if dirty and not ns.Private(me) then Send(partner, BuildStatus(key, me)) end
     dirty = false
     if ns.OnFlush then ns.OnFlush() end
 end
@@ -810,7 +780,7 @@ end
 local function InitDB()
     DuoTrackerDB = DuoTrackerDB or {}
     db = DuoTrackerDB
-    if db.schema ~= 2 then
+    if (db.schema or 0) < 2 then
         db.chars = {} -- earlier versions stored characters under their first name only
         db.schema = 2
     end
@@ -829,14 +799,7 @@ local function InitDB()
         for i, p in ipairs(ns.DEFAULT_PAIRS) do db.pairs[i] = { p[1], p[2] } end
     end
     ns.db = db
-end
-
-local function FindPair(name)
-    local key = norm(name)
-    if key == "" then return nil end
-    for i, p in ipairs(db.pairs) do
-        if norm(p[1]) == key or norm(p[2]) == key then return i end
-    end
+    ns.MigratePairs()
 end
 
 local function trim(s)
@@ -861,16 +824,13 @@ local function Slash(msg)
             Print("Use: /duo pair First Character = Second Character")
             return
         end
-        local i = FindPair(a) or FindPair(b)
-        if i then db.pairs[i] = { a, b } else db.pairs[#db.pairs + 1] = { a, b } end
+        ns.PairUp(a, b)
         Print("Paired " .. a .. " with " .. b .. ".")
-        Changed()
     elseif cmd == "unpair" then
-        local i = FindPair(rest)
+        local i = ns.FindPair(rest)
         if i then
-            table.remove(db.pairs, i)
+            ns.RemovePair(i)
             Print("Removed the pair containing " .. rest .. ".")
-            Changed()
         else
             Print("No pair contains " .. rest .. ".")
         end
@@ -898,7 +858,7 @@ local function Slash(msg)
         Print("/duo - open the window")
         Print("/duo status - this character's pair, in chat")
         Print("/duo sync - sync now")
-        Print("/duo pair A = B - set or change a pair, /duo unpair A - remove one")
+        Print("/duo pair A = B - set or change a pair, /duo unpair A - remove one (or click a name in the window)")
         Print("/duo name Mark - what to call your partner")
         Print("/duo partner Name#1234 - set your partner's BattleTag by hand, /duo partner reset")
         Print("/duo share - turn quest sharing with your partner on or off")
@@ -961,7 +921,7 @@ events:SetScript("OnEvent", function(_, event, ...)
         local prefix, text, channel, sender = ...
         if prefix ~= PREFIX or channel ~= "PARTY" or type(text) ~= "string" or type(sender) ~= "string" then return end
         local key = norm(sender:match("^[^-]+"))
-        if not PairNames()[key] then
+        if not ns.PartnerInParty(sender:match("^[^-]+")) then
             Drop(DROP.PARTY_NOT_PAIRED, sender)
             return
         end
