@@ -68,9 +68,9 @@ local function IsPartnerUnit(unit)
     if not full then return false end
     if ns.PairNames()[norm(full)] then return true end
     local tag = ns.db.partnerTag
-    local guid = tag and UnitGUID and UnitGUID(unit)
+    local guid = tag and UnitGUID and ns.plain(UnitGUID(unit))
     local info = guid and C_BattleNet and C_BattleNet.GetAccountInfoByGUID and C_BattleNet.GetAccountInfoByGUID(guid)
-    return type(info) == "table" and info.battleTag == tag
+    return type(info) == "table" and ns.plain(info.battleTag) == tag
 end
 
 -- Whether the partner is in your party; with a name, whether that party member is the partner.
@@ -114,6 +114,16 @@ local function PairsMessage()
     return "P~" .. (ns.db.pairsRev or 0) .. "~" .. Encode(ns.db.pairs)
 end
 
+-- Starts sharing one of your characters. The only way one becomes shared.
+-- Returns true when it wasn't shared before, so the caller knows to say hello.
+local function ShareOn(key)
+    local c = ns.db.chars[key]
+    if not (c and c.mine) or c.shared == true then return false end
+    c.shared = true
+    ns.db.forget[key] = nil
+    return true
+end
+
 local function Copy()
     local list = {}
     for i, p in ipairs(ns.db.pairs) do list[i] = { p[1], p[2] } end
@@ -127,17 +137,14 @@ function ns.SetPairs(list)
     db.pairs = list
     db.pairsRev = math.max(GetServerTime(), (db.pairsRev or 0) + 1)
     db.pairsBy = "you"
+    local newlyShared = false
     for _, p in ipairs(list) do
-        for n = 1, 2 do
-            local c = db.chars[norm(p[n])]
-            if c and c.mine and c.shared ~= true then
-                c.shared = true -- a character you pair is a character you share
-                db.forget[norm(p[n])] = nil
-            end
-        end
+        -- A character you pair is a character you share.
+        for n = 1, 2 do newlyShared = ShareOn(norm(p[n])) or newlyShared end
     end
     ns.SendToPartner(PairsMessage())
     ns.Changed()
+    if newlyShared then ns.TryHello(true) end -- the hello exchange sends what the partner lacks
 end
 
 -- Equal revisions with different lists: both sides keep the larger encoding, so they agree.
@@ -200,10 +207,10 @@ function ns.SetShared(key, on)
     local c = db.chars[key]
     if not (c and c.mine) then return end
     if on then
-        c.shared = true
-        db.forget[key] = nil
-        ns.Changed()
-        ns.TryHello(true) -- the hello exchange sends what the partner lacks
+        if ShareOn(key) then
+            ns.Changed()
+            ns.TryHello(true) -- the hello exchange sends what the partner lacks
+        end
         return
     end
     c.shared = false

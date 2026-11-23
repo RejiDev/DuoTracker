@@ -543,6 +543,12 @@ def private_characters():
     reji.ns.SetShared("solodolo", False)
     run(reji, mark, 10)
     check("unticking it removes it from Mark's addon", mark.char("solodolo") is None)
+    reji.ns.AssignSlot(reji.ns.FindPair("Marks Uncle"), 2, "Solo Dolo")
+    run(reji, mark, 30)
+    check("picking a private character into a pair shares it within 30 s", xp_of(mark, "solodolo") == (12, 100),
+          "got %r" % (xp_of(mark, "solodolo"),))
+    reji.ns.SetShared("solodolo", False)
+    run(reji, mark, 10)
 
     since = len(reji.sent)
     reji.ns.SetShared("rejiplanty", False)
